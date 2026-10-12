@@ -15,9 +15,9 @@ Chord AI’s core chord detector is original MIT code (no ML weights). Optional 
 
 **Redistribution:** weights are **not** vendored in git. Clients download on first advanced-mode use (`CHORD_AI_MODEL_DIR` in Node). Mirror on R2 with `VITE_UMX_VOCALS_URL` / `VITE_UMX_BASS_URL`.
 
-**ORT wasm:** loaded from jsDelivr CDN (`ort.env.wasm.wasmPaths`); `*.wasm` is listed in `web/dist/.assetsignore` so Cloudflare Workers’ 25 MiB asset limit is not breached (the jsep build alone is ~28 MiB).
+**ORT wasm:** the separate worker imports `onnxruntime-web/wasm` (non-jsep) and loads runtime files **same-origin** from `/ort/` (copied by `npm run sync:ort`, ~14 MiB `ort-wasm-simd-threaded.{wasm,mjs}`). `ort.env.wasm.wasmPaths` = `${origin}/ort/` and `numThreads` is forced to `1` so ORT does not fetch→`blob:`→`import()` the `.mjs` (that path fails under COOP/COEP in Vite workers). The jsep/WebGPU build (~28 MiB) is **not** shipped — it exceeds the Workers 25 MiB asset limit. Oversized variants are listed in `.assetsignore`.
 
-**Client persistence:** a single long-lived `separateWorker` keeps warm ONNX sessions in memory. Model ONNX + ORT wasm/mjs bytes are also stored in **Cache Storage** (`chord-ai-ml-v1`, keyed by absolute URL). Reloads and later analyses load `ArrayBuffer` from cache before any network fetch; the UI shows 已快取 / 尚未下載 and offers **清除模型快取**.
+**Client persistence:** a single long-lived `separateWorker` keeps warm ONNX sessions in memory. **ONNX model** bytes are stored in **Cache Storage** (`chord-ai-ml-v2`, keyed by absolute URL). ORT runtime files are **not** Cache-Storaged (that path produced `blob:` imports and `no available backend`). Reloads load ONNX from cache; the UI shows 已快取 / 尚未下載 and offers **清除模型快取**.
 
 **Chord pipeline use:**
 

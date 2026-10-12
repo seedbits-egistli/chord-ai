@@ -74,7 +74,7 @@ CHORD_AI_TEST_AUDIO=/path/to/dir CHORD_AI_SEPARATE=1 CHORD_AI_SEP_MAX_SEC=60 \
   npm run validate:real -w @chord-ai/engine
 ```
 
-生產環境可把 ONNX 鏡到 R2，並設定 `VITE_UMX_VOCALS_URL` / `VITE_UMX_BASS_URL`。Pages 使用 COOP + COEP `credentialless`（`web/public/_headers`）以啟用多執行緒 WASM，並允許從 CDN 載入 ORT。`npm run dev` 會先建立 stub `web/dist`（含 `.assetsignore`），fresh clone 不必先 `vite build`。
+生產環境可把 ONNX 鏡到 R2，並設定 `VITE_UMX_VOCALS_URL` / `VITE_UMX_BASS_URL`。ORT WASM 由 `npm run sync:ort` 放到同源 `/ort/`（勿走 CDN／Cache Storage blob，以免 Worker 動態 import 失敗）。Pages 使用 COOP + COEP `credentialless`。`npm run dev` 會 sync ORT、建立 stub `web/dist`，fresh clone 可直接啟動。
 
 ## 部署到 Cloudflare（不要在此環境執行；需你的帳號）
 

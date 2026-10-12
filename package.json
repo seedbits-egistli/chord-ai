@@ -13,9 +13,10 @@
     "worker"
   ],
   "scripts": {
-    "predev": "node scripts/ensure-web-dist.mjs && npm run build:engine",
+    "sync:ort": "node scripts/sync-ort-runtime.mjs",
+    "predev": "npm run sync:ort && node scripts/ensure-web-dist.mjs && npm run build:engine",
     "dev": "concurrently -k -n engine,web,api -c teal,cyan,orange \"npm run dev -w @chord-ai/engine\" \"npm run dev -w @chord-ai/web\" \"npm run dev -w @chord-ai/worker\"",
-    "prebuild": "node scripts/ensure-web-dist.mjs",
+    "prebuild": "npm run sync:ort && node scripts/ensure-web-dist.mjs",
     "build": "npm run build -w @chord-ai/engine && npm run build -w @chord-ai/web && npm run build -w @chord-ai/worker",
     "build:engine": "npm run build -w @chord-ai/engine",
     "test": "npm run test -w @chord-ai/engine",
@@ -24,6 +25,7 @@
     "deploy:dry": "npm run build && node scripts/ensure-web-dist.mjs && echo \"Run: wrangler deploy (requires Cloudflare credentials)\"",
     "verify:cache": "node scripts/verify-model-cache.mjs",
     "verify:playback": "node scripts/verify-playback.mjs",
+    "verify:separation": "node scripts/verify-separation.mjs",
     "typecheck": "npm run typecheck -w @chord-ai/engine && npm run typecheck -w @chord-ai/web && npm run typecheck -w @chord-ai/worker"
   },
   "devDependencies": {

@@ -30,6 +30,8 @@ export async function defaultSeparationEnabled(): Promise<{
 }> {
   const mobile = isMobileUa();
   const webgpu = await hasWebGpu();
+  // Separation always uses ORT wasm EP from same-origin /ort/ (jsep/WebGPU
+  // omitted — exceeds Workers asset limit and breaks blob: import in workers).
   if (mobile) {
     return {
       enabled: false,
@@ -38,18 +40,10 @@ export async function defaultSeparationEnabled(): Promise<{
       reason: '進階模式預設關閉；行動裝置上 WASM 分離會較慢（模型約 34MB）',
     };
   }
-  if (webgpu) {
-    return {
-      enabled: false,
-      webgpu,
-      mobile,
-      reason: '進階模式預設關閉；此裝置有 WebGPU，可手動開啟 UMX-HQ 分離（約 34MB）',
-    };
-  }
   return {
     enabled: false,
     webgpu,
     mobile,
-    reason: '進階模式預設關閉；無 WebGPU 時將使用較慢的 WASM（約 34MB）',
+    reason: '進階模式預設關閉；啟用後以同源 ORT WASM 執行 UMX-HQ（約 34MB，可快取）',
   };
 }

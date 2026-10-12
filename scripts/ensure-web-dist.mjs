@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Ensure `web/dist` exists for `wrangler dev` on a fresh clone, and strip any
- * onnxruntime *.wasm that would exceed the Cloudflare Workers 25 MiB asset limit.
- * ORT wasm is loaded from the jsDelivr CDN at runtime (see separateWorker.ts).
+ * Ensure `web/dist` exists for `wrangler dev` on a fresh clone.
+ * Does NOT delete `/ort/*.wasm` (same-origin ORT runtime, ~14 MiB).
+ * Strips only oversized jsep/asyncify variants if present.
  */
 import {
   mkdirSync,
@@ -11,7 +11,6 @@ import {
   readdirSync,
   unlinkSync,
   statSync,
-  readFileSync,
   copyFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -46,23 +45,44 @@ if (existsSync(headersSrc) && !existsSync(headersDst)) {
   copyFileSync(headersSrc, headersDst);
 }
 
+// Copy same-origin ORT runtime into dist if public/ort was synced
+const ortSrc = join(root, 'web/public/ort');
+const ortDst = join(dist, 'ort');
+if (existsSync(ortSrc)) {
+  mkdirSync(ortDst, { recursive: true });
+  for (const name of readdirSync(ortSrc)) {
+    if (name.endsWith('.wasm') || name.endsWith('.mjs')) {
+      copyFileSync(join(ortSrc, name), join(ortDst, name));
+    }
+  }
+}
+
 writeFileSync(
   join(dist, '.assetsignore'),
-  `# ORT wasm is served from CDN — never upload to Workers assets (25 MiB limit)
-*.wasm
-**/*.wasm
+  `# Oversized ORT variants; keep /ort/ort-wasm-simd-threaded.wasm (~14 MiB)
+**/*jsep*.wasm
+**/*asyncify*.wasm
+**/*jspi*.wasm
 `,
 );
 
-stripWasm(dist);
+stripOversizedWasm(dist);
 
-function stripWasm(dir) {
+function stripOversizedWasm(dir) {
   if (!existsSync(dir)) return;
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
     const st = statSync(p);
-    if (st.isDirectory()) stripWasm(p);
-    else if (name.endsWith('.wasm')) {
+    if (st.isDirectory()) {
+      stripOversizedWasm(p);
+      continue;
+    }
+    if (!name.endsWith('.wasm')) continue;
+    const oversized =
+      name.includes('jsep') || name.includes('asyncify') || name.includes('jspi');
+    // Also strip hashed copies under assets/ (bundle leakage)
+    const underAssets = p.includes(`${join('dist', 'assets')}`) || p.includes('/assets/');
+    if (oversized || underAssets) {
       console.log(`[ensure-web-dist] removing ${p} (${(st.size / 1e6).toFixed(1)} MB)`);
       unlinkSync(p);
     }

@@ -1,13 +1,12 @@
 /**
- * Persistent ML asset cache (Cache Storage).
- * Keyed by cache-name version + absolute URL. Shared by the separate worker
- * (models + ORT wasm) and the main thread (status / clear UI).
+ * Persistent ML asset cache (Cache Storage) for ONNX model weights only.
+ * ORT wasm/mjs are loaded from same-origin `/ort/` (see sync-ort-runtime.mjs)
+ * — do not Cache-Storage those files; blob: dynamic import breaks under COOP/COEP.
  *
- * Bump CACHE_VERSION when model URLs or ORT major version change in a
- * incompatible way so stale bytes are dropped on next open.
+ * Bump CACHE_VERSION when model URLs change incompatibly.
  */
 
-export const CACHE_VERSION = 'v1';
+export const CACHE_VERSION = 'v2';
 export const CACHE_NAME = `chord-ai-ml-${CACHE_VERSION}`;
 
 export type CacheSource = 'memory' | 'cache' | 'network';
@@ -60,18 +59,6 @@ export async function putArrayBuffer(
   await cache.put(key, res);
 }
 
-export async function putResponse(url: string, response: Response): Promise<void> {
-  if (!response.ok) return;
-  const cache = await openAssetCache();
-  await cache.put(absUrl(url), response.clone());
-}
-
-export async function listCachedUrls(): Promise<string[]> {
-  const cache = await openAssetCache();
-  const keys = await cache.keys();
-  return keys.map((r) => r.url);
-}
-
 export async function assetStatus(
   entries: { url: string; label: string }[],
 ): Promise<CachedAssetInfo[]> {
@@ -94,18 +81,14 @@ export async function assetStatus(
 }
 
 export async function clearAssetCache(): Promise<void> {
-  await caches.delete(CACHE_NAME);
-  // Also drop any older chord-ai-ml-* caches
   const names = await caches.keys();
   await Promise.all(
-    names.filter((n) => n.startsWith('chord-ai-ml-') && n !== CACHE_NAME).map((n) => caches.delete(n)),
+    names.filter((n) => n.startsWith('chord-ai-ml-')).map((n) => caches.delete(n)),
   );
 }
 
 /**
- * Install a fetch interceptor that serves Cache Storage hits for matching URLs
- * and writes successful network responses back. Used so ORT’s internal wasm
- * loads also persist across reloads.
+ * Fetch interceptor for ONNX model URLs only (not ORT runtime).
  */
 export function installFetchCacheInterceptor(shouldCache: (url: string) => boolean): void {
   const g = self as typeof self & { __chordFetchPatched?: boolean };
@@ -136,18 +119,13 @@ export function installFetchCacheInterceptor(shouldCache: (url: string) => boole
       try {
         await cache.put(url, res.clone());
       } catch {
-        /* quota / opaque — ignore */
+        /* quota — ignore */
       }
     }
     return res;
   };
 }
 
-/** ORT CDN assets that should be Cache-Storage-backed. */
-export function isOrtCdnUrl(url: string, ortCdnBase: string): boolean {
-  return url.startsWith(ortCdnBase) || /onnxruntime-web@[\d.]+\/dist\//.test(url);
-}
-
 export function isOnnxModelUrl(url: string): boolean {
-  return /\.onnx(\?|$)/i.test(url) || /huggingface\.co\/.*\.(onnx)/i.test(url);
+  return /\.onnx(\?|$)/i.test(url) || /huggingface\.co\/.*\.onnx/i.test(url);
 }

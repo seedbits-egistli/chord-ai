@@ -20,3 +20,5 @@ docs/validation-results.json
 *.log
 *.onnx
 /tmp/
+web/public/ort/*.wasm
+web/public/ort/*.mjs

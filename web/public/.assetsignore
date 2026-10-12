@@ -1,4 +1,4 @@
-# Copied into web/dist on build / ensure-web-dist.
-# ORT wasm is loaded from jsDelivr — never ship *.wasm as Workers assets.
-*.wasm
-**/*.wasm
+# Oversized ORT variants (>25 MiB Workers limit). Keep /ort/ort-wasm-simd-threaded.wasm (~14 MiB).
+**/*jsep*.wasm
+**/*asyncify*.wasm
+**/*jspi*.wasm

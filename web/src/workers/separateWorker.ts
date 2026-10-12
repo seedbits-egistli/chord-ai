@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
-import * as ort from 'onnxruntime-web';
+// wasm-only entry (not default ort which loads ort-wasm-simd-threaded.jsep.*).
+import * as ort from 'onnxruntime-web/wasm';
 import {
   UMX_BASS_URL,
   UMX_SAMPLE_RATE,
@@ -16,23 +17,23 @@ import {
   getCachedArrayBuffer,
   installFetchCacheInterceptor,
   isOnnxModelUrl,
-  isOrtCdnUrl,
   putArrayBuffer,
   type CacheSource,
   type CachedAssetInfo,
 } from '../lib/assetCache';
 
-/** ORT wasm/mjs loaded from CDN — keep Workers static assets under the 25 MiB limit. */
-const ORT_VERSION = '1.30.0';
-const ORT_WASM_CDN = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
-
-/** ORT files we proactively pin into Cache Storage (wasm EP + jsep for WebGPU). */
-const ORT_PIN_FILES = [
-  'ort-wasm-simd-threaded.wasm',
-  'ort-wasm-simd-threaded.mjs',
-  'ort-wasm-simd-threaded.jsep.wasm',
-  'ort-wasm-simd-threaded.jsep.mjs',
-];
+/**
+ * Same-origin ORT wasm runtime (web/public/ort via sync-ort-runtime.mjs).
+ * Must be real http(s) URLs — ORT's multi-thread path fetch()→blob:→import()
+ * fails under COOP/COEP in Vite workers (and jsep is not shipped).
+ */
+function ortWasmBase(): string {
+  const origin =
+    typeof self !== 'undefined' && self.location?.origin && self.location.origin !== 'null'
+      ? self.location.origin
+      : '';
+  return `${origin}/ort/`;
+}
 
 export type SeparateRequest = {
   type?: 'separate';
@@ -43,6 +44,7 @@ export type SeparateRequest = {
   bassUrl?: string;
   /** When false, skip bass ONNX (~17 MiB) and use lowpass proxy. Default true. */
   useBass?: boolean;
+  /** Ignored: WebGPU/jsep is not shipped (25 MiB limit); wasm EP only. */
   preferWebGpu?: boolean;
 };
 
@@ -111,27 +113,43 @@ export type SeparateResponse =
   | { id: number; type: 'cacheCleared' }
   | { id: number; type: 'prefetchDone'; sources: Record<string, CacheSource> };
 
-/** In-memory bytes (survives across analyses in the same long-lived worker). */
+/** In-memory ONNX bytes (survives across analyses in the same long-lived worker). */
 const memoryBuffers = new Map<string, ArrayBuffer>();
 /** Warm ONNX sessions keyed by url + EP list. */
 const sessions = new Map<string, OrtSession>();
 let ortConfigured = false;
-let ortWarmSource: CacheSource = 'network';
+let ortInitPromise: Promise<void> | null = null;
 
-installFetchCacheInterceptor(
-  (url) => isOrtCdnUrl(url, ORT_WASM_CDN) || isOnnxModelUrl(url),
-);
+// Cache ONNX fetches only — never ORT .mjs/.wasm (breaks blob: dynamic import).
+installFetchCacheInterceptor((url) => isOnnxModelUrl(url));
 
-function configureOrt(preferWebGpu: boolean) {
+async function configureOrt(): Promise<void> {
   if (ortConfigured) return;
-  ort.env.wasm.wasmPaths = ORT_WASM_CDN;
+  if (ortInitPromise) return ortInitPromise;
+  ortInitPromise = (async () => {
+    const base = ortWasmBase();
+    ort.env.wasm.wasmPaths = base;
+    // numThreads>1 makes ORT fetch the .mjs, wrap it as blob:, then import() —
+    // that fails under COOP/COEP ("Failed to fetch dynamically imported module: blob:…").
+    // Keep single-threaded same-origin import of /ort/*.mjs.
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.proxy = false;
+    // Probe that same-origin runtime is reachable before InferenceSession.create
+    const mjsUrl = `${base}ort-wasm-simd-threaded.mjs`;
+    const probe = await fetch(mjsUrl, { method: 'GET' });
+    if (!probe.ok) {
+      throw new Error(
+        `ORT runtime missing at ${mjsUrl} (${probe.status}). Run: npm run sync:ort`,
+      );
+    }
+    ortConfigured = true;
+  })();
   try {
-    ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2);
-  } catch {
-    /* ignore */
+    await ortInitPromise;
+  } catch (e) {
+    ortInitPromise = null;
+    throw e;
   }
-  void preferWebGpu;
-  ortConfigured = true;
 }
 
 function post(msg: SeparateResponse) {
@@ -158,14 +176,11 @@ function resolveUrls(msg: {
   };
 }
 
-function trackedUrls(vocalsUrl: string, bassUrl: string, withBass: boolean) {
+function trackedModelUrls(vocalsUrl: string, bassUrl: string, withBass: boolean) {
   const entries: { url: string; label: string }[] = [
     { url: vocalsUrl, label: 'vocals.onnx' },
   ];
   if (withBass) entries.push({ url: bassUrl, label: 'bass.onnx' });
-  for (const f of ORT_PIN_FILES) {
-    entries.push({ url: `${ORT_WASM_CDN}${f}`, label: f });
-  }
   return entries;
 }
 
@@ -244,43 +259,22 @@ async function loadAsset(
 
   memoryBuffers.set(url, buf);
   try {
-    await putArrayBuffer(url, buf, label.endsWith('.onnx') ? 'application/octet-stream' : 'application/wasm');
+    await putArrayBuffer(url, buf, 'application/octet-stream');
   } catch (e) {
     console.warn('Cache Storage put failed', e);
   }
   return { buf, source: 'network' };
 }
 
-async function pinOrtWasm(
-  id: number,
-  preferWebGpu: boolean,
-): Promise<CacheSource> {
-  const files = preferWebGpu
-    ? ORT_PIN_FILES
-    : ORT_PIN_FILES.filter((f) => !f.includes('jsep'));
-  let worst: CacheSource = 'memory';
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i]!;
-    const url = `${ORT_WASM_CDN}${f}`;
-    // Quiet progress band 0.0–0.02
-    const { source } = await loadAsset(url, id, f, 0.001 + i * 0.002, 0.01 + i * 0.002);
-    if (source === 'network') worst = 'network';
-    else if (source === 'cache' && worst === 'memory') worst = 'cache';
-  }
-  ortWarmSource = worst;
-  return worst;
-}
-
 async function getOrCreateSession(
   url: string,
   buf: ArrayBuffer,
-  providers: string[],
 ): Promise<OrtSession> {
-  const key = `${url}|${providers.join(',')}`;
+  const key = `${url}|wasm`;
   const hit = sessions.get(key);
   if (hit) return hit;
-  const session = await ort.InferenceSession.create(buf, {
-    executionProviders: providers,
+  const session = await ort.InferenceSession.create(buf.slice(0), {
+    executionProviders: ['wasm'],
     graphOptimizationLevel: 'basic',
     enableCpuMemArena: false,
     enableMemPattern: false,
@@ -291,8 +285,7 @@ async function getOrCreateSession(
 
 async function handleCacheStatus(msg: CacheStatusRequest) {
   const { vocalsUrl, bassUrl, withBass } = resolveUrls(msg);
-  const entries = await assetStatus(trackedUrls(vocalsUrl, bassUrl, withBass));
-  // Treat memory hits as cached for UI
+  const entries = await assetStatus(trackedModelUrls(vocalsUrl, bassUrl, withBass));
   for (const e of entries) {
     if (!e.cached && memoryBuffers.has(e.url)) {
       e.cached = true;
@@ -300,8 +293,7 @@ async function handleCacheStatus(msg: CacheStatusRequest) {
     }
   }
   const totalBytes = entries.reduce((s, e) => s + (e.bytes ?? 0), 0);
-  const modelEntries = entries.filter((e) => e.label.endsWith('.onnx'));
-  const allCached = modelEntries.every((e) => e.cached);
+  const allCached = entries.length > 0 && entries.every((e) => e.cached);
   post({
     id: msg.id,
     type: 'cacheStatus',
@@ -316,17 +308,15 @@ async function handleCacheStatus(msg: CacheStatusRequest) {
 async function handleClearCache(msg: ClearCacheRequest) {
   memoryBuffers.clear();
   sessions.clear();
-  ortConfigured = false;
-  ortWarmSource = 'network';
+  // Keep ortConfigured — runtime files are same-origin, not in Cache Storage
   await clearAssetCache();
   post({ id: msg.id, type: 'cacheCleared' });
 }
 
 async function handlePrefetch(msg: PrefetchRequest) {
   const { vocalsUrl, bassUrl, withBass } = resolveUrls(msg);
-  configureOrt(msg.preferWebGpu !== false);
-  const sources: Record<string, CacheSource> = {};
-  sources.ort = await pinOrtWasm(msg.id, msg.preferWebGpu !== false);
+  await configureOrt();
+  const sources: Record<string, CacheSource> = { ort: 'memory' };
   const v = await loadAsset(vocalsUrl, msg.id, 'vocals.onnx', 0.05, 0.4);
   sources.vocals = v.source;
   if (withBass) {
@@ -337,37 +327,35 @@ async function handlePrefetch(msg: PrefetchRequest) {
 }
 
 async function handleSeparate(msg: SeparateRequest) {
-  const { id, samples, sampleRate, preferWebGpu, useBass } = msg;
+  const { id, samples, sampleRate, useBass } = msg;
   try {
-    configureOrt(preferWebGpu !== false);
+    post({ id, type: 'progress', progress: 0.02, detail: '初始化 ORT（同源 /ort/）…' });
+    await configureOrt();
     const { vocalsUrl, bassUrl, withBass } = resolveUrls({
       vocalsUrl: msg.vocalsUrl,
       bassUrl: msg.bassUrl,
       useBass,
     });
 
-    const ortSource = await pinOrtWasm(id, preferWebGpu !== false);
-    const v = await loadAsset(vocalsUrl, id, 'vocals.onnx', 0.02, 0.22);
+    const v = await loadAsset(vocalsUrl, id, 'vocals.onnx', 0.05, 0.25);
     let bassBuf: ArrayBuffer | null = null;
     let bassSource: CacheSource | 'skipped' = 'skipped';
     if (withBass) {
-      const b = await loadAsset(bassUrl, id, 'bass.onnx', 0.22, 0.4);
+      const b = await loadAsset(bassUrl, id, 'bass.onnx', 0.25, 0.4);
       bassBuf = b.buf;
       bassSource = b.source;
     }
 
-    const providers: string[] = preferWebGpu !== false ? ['webgpu', 'wasm'] : ['wasm'];
-    const vocalsSession = await getOrCreateSession(vocalsUrl, v.buf, providers);
-    const bassSession = bassBuf
-      ? await getOrCreateSession(bassUrl, bassBuf, providers)
-      : null;
+    post({ id, type: 'progress', progress: 0.42, detail: '建立 ONNX session…' });
+    const vocalsSession = await getOrCreateSession(vocalsUrl, v.buf);
+    const bassSession = bassBuf ? await getOrCreateSession(bassUrl, bassBuf) : null;
 
     const stems = await separateWithUmx(samples, sampleRate, {
       ort: ort as unknown as import('@chord-ai/engine').OrtLike,
       vocalsSession,
       bassSession,
       sessionOptions: {
-        executionProviders: providers,
+        executionProviders: ['wasm'],
         graphOptimizationLevel: 'basic',
         enableCpuMemArena: false,
         enableMemPattern: false,
@@ -376,7 +364,7 @@ async function handleSeparate(msg: SeparateRequest) {
         post({
           id,
           type: 'progress',
-          progress: 0.4 + p.progress * 0.55,
+          progress: 0.45 + p.progress * 0.5,
           detail: p.detail || p.phase,
           fromCache: v.source !== 'network' && bassSource !== 'network',
         });
@@ -386,7 +374,7 @@ async function handleSeparate(msg: SeparateRequest) {
     post({
       id,
       ok: true,
-      sources: { vocals: v.source, bass: bassSource, ort: ortSource },
+      sources: { vocals: v.source, bass: bassSource, ort: 'memory' },
       stems: {
         drumsL: stems.drums.left,
         drumsR: stems.drums.right,
