@@ -217,13 +217,13 @@ async function main() {
   lines.push('');
   lines.push('## Before / after (precise first 60s)');
   lines.push('');
-  lines.push('| Song | Before tone % (1f18a77) | After tone % | Δ | Key | Downbeat phase |');
-  lines.push('|---|---:|---:|---:|---|---:|');
+  lines.push('| Song | Before tone % | After tone % | Δ | Key | Downbeat phase | NNLS ms |');
+  lines.push('|---|---:|---:|---:|---|---:|---:|');
   lines.push(
-    `| Hey Jude | 86.4 | **${hj.score.toneOverlapPct.toFixed(1)}** | ${hj.score.toneOverlapPct - 86.4 >= 0 ? '+' : ''}${(hj.score.toneOverlapPct - 86.4).toFixed(1)} | ${hj.result.key} | ${hj.result.downbeatPhase} |`,
+    `| Hey Jude | 94.3 | **${hj.score.toneOverlapPct.toFixed(1)}** | ${hj.score.toneOverlapPct - 94.3 >= 0 ? '+' : ''}${(hj.score.toneOverlapPct - 94.3).toFixed(1)} | ${hj.result.key} | ${hj.result.downbeatPhase} | ${hj.result.nnlsAnalysisMs?.toFixed(0) ?? '—'} |`,
   );
   lines.push(
-    `| Wonderwall | 42.1 | **${ww.score.toneOverlapPct.toFixed(1)}** | ${ww.score.toneOverlapPct - 42.1 >= 0 ? '+' : ''}${(ww.score.toneOverlapPct - 42.1).toFixed(1)} | ${ww.result.key} | ${ww.result.downbeatPhase} |`,
+    `| Wonderwall | 49.7 | **${ww.score.toneOverlapPct.toFixed(1)}** | ${ww.score.toneOverlapPct - 49.7 >= 0 ? '+' : ''}${(ww.score.toneOverlapPct - 49.7).toFixed(1)} | ${ww.result.key} | ${ww.result.downbeatPhase} | ${ww.result.nnlsAnalysisMs?.toFixed(0) ?? '—'} |`,
   );
   lines.push('');
 

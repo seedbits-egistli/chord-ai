@@ -33,12 +33,15 @@ The separate / precise workers import `onnxruntime-web/wasm` (non-jsep) and load
 
 ## Precise chord pipeline
 
-1. UMX-HQ → stems  
-2. Basic Pitch → note events on `other` + `bass`  
+1. UMX-HQ → stems; soft vocal residual subtract on instrumental  
+2. Basic Pitch → note events on `other` + `bass` (vocal-correlated notes down-weighted)  
 3. Beat grid → **harmonic-novelty downbeat** (training-free; optional local re-phase ~8 bars)  
-4. Per-beat duration×velocity PC histogram; bass / lowest-note root evidence; drone suppress  
-5. **Metric-position HMM/Viterbi** (Mauch & Dixon 2010 simplified): change preferred on beat 1, some on beat 3, rare on 2/4; key prior + out-of-key tone penalty; self-transition bias; hand-set parameters only  
-6. Merge identical labels; full quality vocabulary + slash chords (no staff from notes)  
+4. **NNLS approximate-note-transcription chroma** (Mauch & Dixon ISMIR 2010, independent MIT impl.): log-freq (3 bins/semitone) → tuning → spectral standardisation → NNLS vs harmonic note dictionary → treble + bass chroma per beat  
+5. Fuse NNLS treble/bass with Basic Pitch PC histogram (reliability-weighted); soft drone discount with novelty keep for sus/7 tones; size-normalised template presence  
+6. **Metric-position HMM/Viterbi**: change preferred on beat 1, some on beat 3, rare on 2/4; key prior; hand-set parameters only  
+7. Merge identical labels; full quality vocabulary + slash chords (no staff from notes)  
+
+Not derived from Chordino / nnls-chroma (GPL).  
 
 ## Accuracy vs size
 

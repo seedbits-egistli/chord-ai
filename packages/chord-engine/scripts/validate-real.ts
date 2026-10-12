@@ -40,10 +40,10 @@ const BEFORE_TONE = {
   Wonderwall: { fast: 42.5, precise: 42.8 },
 } as const;
 
-/** Frozen post-tuning precise tone % (commit 1f18a77) — baseline for metric/downbeat work. */
+/** Frozen precise tone % before NNLS chroma fusion. */
 const BEFORE_METRIC_TONE = {
-  'Hey Jude': 86.4,
-  Wonderwall: 42.1,
+  'Hey Jude': 94.3,
+  Wonderwall: 49.7,
 } as const;
 
 /** Frozen post-tuning fast / UMX / precise (1f18a77) for historical tuning table. */
@@ -80,6 +80,7 @@ interface Row {
   sections?: SectionTone[];
   /** Precise-mode estimated downbeat phase (i%4===phase → downbeat). */
   downbeatPhase?: number;
+  nnlsMs?: number;
 }
 
 function chordAt(events: ChordEvent[], tMs: number): string {
@@ -410,13 +411,14 @@ async function main() {
                 ...toneFields(precScore),
                 detectedKey: preciseResult.key,
                 refKey: ref.key,
-                note: `精準模式 UMX+Basic Pitch metric-HMM on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}; downbeatPhase=${preciseResult.downbeatPhase}`,
+                note: `精準模式 UMX+NNLS+Basic Pitch on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}; downbeatPhase=${preciseResult.downbeatPhase}; nnlsMs=${preciseResult.nnlsAnalysisMs?.toFixed?.(0) ?? '—'}`,
                 sections,
                 downbeatPhase: preciseResult.downbeatPhase,
+                nnlsMs: preciseResult.nnlsAnalysisMs,
               };
               rows.push(precRow);
               console.log(
-                `${ref.title} +precise (first ${sepMaxSec}s): tone ${precRow.toneOverlapPct}% (J=${precRow.toneJaccardPct} R=${precRow.toneRecallPct} root=${precRow.rootMatchPct}) exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key} downbeatPhase=${preciseResult.downbeatPhase}`,
+                `${ref.title} +precise (first ${sepMaxSec}s): tone ${precRow.toneOverlapPct}% (J=${precRow.toneJaccardPct} R=${precRow.toneRecallPct} root=${precRow.rootMatchPct}) exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key} downbeatPhase=${preciseResult.downbeatPhase} nnlsMs=${preciseResult.nnlsAnalysisMs?.toFixed?.(0) ?? '—'}`,
               );
               if (sections?.length) {
                 console.log(
@@ -500,7 +502,7 @@ function writeDocs(rows: Row[]) {
     '3. **Real audio (local only)**: `hey_jude.mp3` / `wonderwall.mp3` via `CHORD_AI_TEST_AUDIO` + ffmpeg. **Never committed.**',
     '4. **Wonderwall** scored in **sounding key** (capo 2 → F#m7–A–Esus4–B7sus4).',
     '5. **快速模式**: full-mix chroma templates (no ML download).',
-    '6. **精準模式** (UI opt-in): UMX-HQ → Basic Pitch on `other`/`bass` → **training-free** beat-level metric HMM (Mauch & Dixon 2010 simplified): harmonic-novelty downbeat + per-beat PC emissions + metric-position transitions + key/out-of-key prior. No staff generation. See [`docs/models.md`](./models.md).',
+    '6. **精準模式** (UI opt-in): UMX-HQ → Basic Pitch + **NNLS chroma** (Mauch & Dixon ISMIR 2010, independent MIT) fused into beat-level metric HMM; harmonic downbeat; drone/sus-aware scoring; vocal residual control. See [`docs/models.md`](./models.md).',
     '7. Beat-level metrics with lag / loop-phase search. **Headline metric is tone overlap** (shared pitch classes), not chord-name equality:',
     '   - **Tone overlap %** (primary): mean of `0.55·Jaccard + 0.35·recall + 0.10·rootMatch` per beat, where Jaccard = `|A∩B|/|A∪B|` and recall = `|A∩B|/|A|` over reference/hypothesis pitch-class sets.',
     '   - **Jaccard / Recall / Root**: component columns (root match reported separately).',
@@ -676,21 +678,22 @@ function writeDocs(rows: Row[]) {
     lines.push('');
 
     // Metric HMM / downbeat before/after (live precise vs 1f18a77)
-    lines.push('### Before / after (metric HMM + harmonic downbeat)');
+    lines.push('### Before / after (NNLS chroma + metric HMM)');
     lines.push('');
     lines.push(
-      'Training-free precise decode (Mauch & Dixon 2010 simplified): harmonic-novelty downbeat phase (+ local re-phase ~8 bars), beat-level PC-histogram emissions with bass/lowest-note root evidence, metric-position Viterbi (change preferred on beat 1, some on beat 3, rare on 2/4), key prior + out-of-key tone penalty, self-transition bias. Hand-set parameters only — no labeled training. Detailed Wonderwall per-bar / histogram dump: [`docs/precise-metric-report.md`](./precise-metric-report.md).',
+      'Training-free precise decode (Mauch & Dixon ISMIR 2010, independent MIT impl. — not GPL Chordino): NNLS approximate-note-transcription chroma (log-freq 3 bins/semitone, spectral std, harmonic dictionary) fused with Basic Pitch histograms; harmonic-novelty downbeat; metric Viterbi; drone/novelty-aware sus scoring; soft vocal residual subtract. Detailed dump: [`docs/precise-metric-report.md`](./precise-metric-report.md).',
     );
     lines.push('');
-    lines.push('| Song | Before tone % (1f18a77) | After tone % | Δ | Key | Downbeat phase |');
-    lines.push('|---|---:|---:|---:|---|---:|');
+    lines.push('| Song | Before tone % | After tone % | Δ | Key | Downbeat phase | NNLS ms |');
+    lines.push('|---|---:|---:|---:|---|---:|---:|');
     for (const r of precise) {
       const baseTitle = r.title.replace(' (+precise)', '') as keyof typeof BEFORE_METRIC_TONE;
       const before = BEFORE_METRIC_TONE[baseTitle];
       if (before === undefined) continue;
       const d = `${r.toneOverlapPct - before >= 0 ? '+' : ''}${(r.toneOverlapPct - before).toFixed(1)}`;
+      const nnls = r.nnlsMs != null && Number.isFinite(r.nnlsMs) ? r.nnlsMs.toFixed(0) : '—';
       lines.push(
-        `| ${baseTitle} | ${before.toFixed(1)} | **${fmt(r.toneOverlapPct)}** | ${d} | ${r.detectedKey} | ${r.downbeatPhase ?? '—'} |`,
+        `| ${baseTitle} | ${before.toFixed(1)} | **${fmt(r.toneOverlapPct)}** | ${d} | ${r.detectedKey} | ${r.downbeatPhase ?? '—'} | ${nnls} |`,
       );
     }
     lines.push('');

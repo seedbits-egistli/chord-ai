@@ -51,6 +51,8 @@ export interface DetectionResult {
   downbeatPhase?: number;
   /** Precise-mode: per-beat metric position 0..3 (0 = downbeat). */
   beatInBar?: number[];
+  /** Precise-mode: NNLS chroma analysis time (ms), if run. */
+  nnlsAnalysisMs?: number;
 }
 
 export interface DetectOptions {

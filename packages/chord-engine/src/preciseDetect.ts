@@ -1,13 +1,13 @@
 /**
  * Note-based chord inference for 精準模式 (precise mode).
  *
- * Training-free pipeline (Mauch & Dixon 2010 simplified):
+ * Training-free pipeline (Mauch & Dixon 2010, independently implemented):
  * 1) Beat grid → harmonic-novelty downbeat phase (+ local re-phase)
- * 2) Per-beat PC histogram emissions (templates + bass/lowest-note)
- * 3) Metric-position HMM/Viterbi (change preferred on beat 1, rare on 2/4)
- *    with key prior / out-of-key tone penalty
+ * 2) NNLS approximate-note-transcription chroma (treble + bass) from instrumental
+ * 3) Fuse NNLS + Basic Pitch PC histogram (reliability-weighted) → emissions
+ * 4) Metric-position HMM/Viterbi + key/drone/sus-aware template scoring
  *
- * No staff notation — chords only. No model training.
+ * No staff notation — chords only. No model training. Not derived from GPL Chordino.
  */
 
 import { trackBeats } from './beats.js';
@@ -30,6 +30,7 @@ import {
   type BeatObservation,
   type MatchContext,
 } from './match.js';
+import { computeNnlsBeatChroma } from './nnlsChroma.js';
 import { buildInstrumental, type SeparationStems } from './separate.js';
 import type { ChordEvent, ChordLabel, DetectOptions, DetectionResult } from './types.js';
 
@@ -60,6 +61,14 @@ export interface PreciseDetectOptions extends DetectOptions {
   bassEnergyRatio?: number;
   /** Re-estimate downbeat every N bars (0 = global only). Default 8. */
   downbeatChunkBars?: number;
+  /** Enable NNLS chroma from instrumental (default true when beat audio present). */
+  useNnls?: boolean;
+  /** Weight of NNLS treble vs fused emission (0–1). Default 0.55. */
+  nnlsWeight?: number;
+  /** Soft-subtract scaled vocal stem from instrumental before NNLS (0–1). Default 0.25. */
+  vocalResidual?: number;
+  /** Optional mono vocal stem (same rate/length as beat audio) for leakage control. */
+  vocalSamples?: Float32Array;
   /** @deprecated Prefer metricDecode; kept for callers that passed halfBar. */
   halfBar?: boolean;
 }
@@ -282,6 +291,99 @@ function beatWindows(
   return windows;
 }
 
+/** Soft-subtract vocal residual from instrumental (clip not applied — signed ok for analysis). */
+export function subtractVocalResidual(
+  instrumental: Float32Array,
+  vocals: Float32Array,
+  amount: number,
+): Float32Array {
+  const n = Math.min(instrumental.length, vocals.length);
+  const out = new Float32Array(n);
+  const a = Math.max(0, Math.min(1, amount));
+  for (let i = 0; i < n; i++) {
+    out[i] = instrumental[i]! - a * vocals[i]!;
+  }
+  return out;
+}
+
+/** RMS in [startSec, endSec) for mono samples. */
+function rmsInRange(
+  samples: Float32Array,
+  sampleRate: number,
+  startSec: number,
+  endSec: number,
+): number {
+  const i0 = Math.max(0, Math.floor(startSec * sampleRate));
+  const i1 = Math.min(samples.length, Math.floor(endSec * sampleRate));
+  if (i1 <= i0) return 0;
+  let s = 0;
+  for (let i = i0; i < i1; i++) s += samples[i]! * samples[i]!;
+  return Math.sqrt(s / (i1 - i0));
+}
+
+/**
+ * Down-weight Basic Pitch notes whose windows are dominated by vocal energy
+ * (likely leakage into `other`).
+ */
+export function filterVocalLeakNotes(
+  notes: NoteEvent[],
+  other: Float32Array,
+  vocals: Float32Array,
+  sampleRate: number,
+): NoteEvent[] {
+  return notes
+    .map((n) => {
+      const t0 = n.time;
+      const t1 = n.time + Math.max(0.01, n.duration);
+      const vR = rmsInRange(vocals, sampleRate, t0, t1);
+      const oR = rmsInRange(other, sampleRate, t0, t1);
+      let vel = n.velocity;
+      if (vR > 1e-6 && vR > oR * 1.15) {
+        const ratio = vR / Math.max(1e-6, oR);
+        vel *= Math.max(0.15, 1 / (0.5 + ratio));
+      }
+      return { ...n, velocity: vel };
+    })
+    .filter((n) => n.velocity >= 0.08);
+}
+
+/** Per-PC drone strength (high mean, low variance across beats) ∈ [0,1]. */
+function computeDroneStrength(chromas: Float32Array[]): Float32Array {
+  const strength = new Float32Array(12);
+  if (chromas.length < 4) return strength;
+  for (let p = 0; p < 12; p++) {
+    let mean = 0;
+    for (const c of chromas) mean += c[p]!;
+    mean /= chromas.length;
+    let var_ = 0;
+    for (const c of chromas) {
+      const d = c[p]! - mean;
+      var_ += d * d;
+    }
+    var_ /= chromas.length;
+    const s = mean / (mean + Math.sqrt(var_) + 0.08);
+    strength[p] = Math.max(0, Math.min(1, s * (mean > 0.12 ? 1 : 0.5)));
+  }
+  return strength;
+}
+
+/** Per-beat, per-PC novelty vs previous beat chroma. */
+function computeLocalNovelty(chromas: Float32Array[]): Float32Array[] {
+  return chromas.map((c, i) => {
+    const nov = new Float32Array(12);
+    if (i === 0) {
+      nov.fill(0.5);
+      return nov;
+    }
+    const prev = chromas[i - 1]!;
+    for (let p = 0; p < 12; p++) {
+      const d = Math.abs(c[p]! - prev[p]!);
+      nov[p] = Math.max(0, Math.min(1, d * 2.5));
+    }
+    return nov;
+  });
+}
+
 /**
  * Chord detection from transcribed notes + optional stem audio for beat tracking.
  */
@@ -295,6 +397,8 @@ export function detectChordsFromNotes(
   const simplifyLevel = options.simplifyLevel ?? 0.45;
   const metricDecode = options.metricDecode !== false;
   const droneFrac = options.droneWindowFrac ?? 0.42;
+  const nnlsWeight = Math.min(1, Math.max(0, options.nnlsWeight ?? 0.55));
+  const useNnls = options.useNnls !== false;
 
   let bpm = options.bpmHint ?? 120;
   let beats: number[] = [];
@@ -302,6 +406,7 @@ export function detectChordsFromNotes(
   let audioFrames: ReturnType<typeof computeChromaFrames> | null = null;
   const audioBlend = Math.min(1, Math.max(0, options.audioChromaBlend ?? 0));
   const allowSlash = options.allowSlash !== false;
+  let nnlsAnalysisMs = 0;
 
   if (beatAudio && beatAudio.samples.length > 1024) {
     const frameSize = options.frameSize ?? (beatAudio.sampleRate >= 44100 ? 8192 : 4096);
@@ -337,8 +442,25 @@ export function detectChordsFromNotes(
   const allNotes = accompanimentNotes.concat(bassNotes);
   const droneNotes = accompanimentNotes.length ? accompanimentNotes : allNotes;
 
-  // Per-beat chromas for downbeat (raw, before drone subtract)
+  let nnlsTreble: (Float32Array | null)[] = windows.map(() => null);
+  let nnlsBassArr: (Float32Array | null)[] = windows.map(() => null);
+  if (useNnls && beatAudio && beatAudio.samples.length > 1024) {
+    const nnls = computeNnlsBeatChroma(
+      beatAudio.samples,
+      beatAudio.sampleRate,
+      beats,
+      durationMs,
+      { maxFrames: 360 },
+    );
+    nnlsAnalysisMs = nnls.analysisMs;
+    for (let i = 0; i < Math.min(windows.length, nnls.beats.length); i++) {
+      nnlsTreble[i] = nnls.beats[i]!.treble;
+      nnlsBassArr[i] = nnls.beats[i]!.bass;
+    }
+  }
+
   const beatChromas = buildBeatChromas(windows.length, (i) => {
+    if (nnlsTreble[i]) return nnlsTreble[i]!;
     const w = windows[i]!;
     let ch = noteChroma(accompanimentNotes, w.startSec, w.endSec);
     let peak = 0;
@@ -358,6 +480,9 @@ export function detectChordsFromNotes(
       ? new Set<number>()
       : findDronePcs(droneNotes, windows, Math.max(0.65, droneFrac));
 
+  const droneStrength = computeDroneStrength(beatChromas);
+  const localNovelty = computeLocalNovelty(beatChromas);
+
   let key = estimateKeyFromNoteHist(allNotes.length ? allNotes : accompanimentNotes);
 
   const bassEnergyRatio = options.bassEnergyRatio ?? 1;
@@ -367,37 +492,70 @@ export function detectChordsFromNotes(
   const observations: BeatObservation[] = [];
   for (let bi = 0; bi < windows.length; bi++) {
     const w = windows[bi]!;
-    let chroma = noteChroma(accompanimentNotes, w.startSec, w.endSec, hardDrones);
-    let peak = 0;
-    for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
-    const accompEmpty = peak < 0.05;
-    // When UMX "other" is silent (WW intro: ~0 notes until verse), do NOT let
-    // bass-stem leakage invent the harmony — prefer instrumental audio chroma.
-    if (accompEmpty && audioFrames) {
-      chroma = averageChroma(audioFrames, w.startMs, w.endMs).chroma;
+    let noteCh = noteChroma(accompanimentNotes, w.startSec, w.endSec, hardDrones);
+    let notePeak = 0;
+    for (let p = 0; p < 12; p++) notePeak = Math.max(notePeak, noteCh[p]!);
+    const noteCount = notesInWindow(accompanimentNotes, w.startSec, w.endSec).length;
+    const accompEmpty = notePeak < 0.05 || noteCount < 2;
+
+    const bpReliability = accompEmpty
+      ? 0
+      : Math.min(1, (noteCount / 8) * 0.55 + notePeak * 0.45);
+
+    let chroma = new Float32Array(12);
+    const nt = nnlsTreble[bi];
+    if (nt && nnlsWeight > 0) {
+      const bpW = (1 - nnlsWeight) * bpReliability;
+      const nnW = nnlsWeight + (1 - nnlsWeight) * (1 - bpReliability);
+      if (bpW > 0.05) {
+        for (let p = 0; p < 12; p++) chroma[p] = nnW * nt[p]! + bpW * noteCh[p]!;
+      } else {
+        chroma.set(nt);
+      }
       normalizeL2(chroma);
-    } else if (accompEmpty) {
-      chroma = noteChroma(allNotes, w.startSec, w.endSec);
+    } else if (!accompEmpty) {
+      chroma.set(noteCh);
+      if (options.suppressDrone !== false) {
+        subtractDroneMean(chroma, droneMean, weakBass ? 0.62 : 0.55);
+      }
+    } else if (audioFrames) {
+      chroma.set(averageChroma(audioFrames, w.startMs, w.endMs).chroma);
+      normalizeL2(chroma);
+    } else {
+      chroma.set(noteChroma(allNotes, w.startSec, w.endSec));
     }
-    if (options.suppressDrone !== false && !accompEmpty) {
-      subtractDroneMean(chroma, droneMean, weakBass ? 0.62 : 0.55);
-    }
-    if (audioFrames && audioBlend > 0 && !accompEmpty) {
+
+    if (audioFrames && audioBlend > 0 && bpReliability > 0.2) {
       const ac = averageChroma(audioFrames, w.startMs, w.endMs).chroma;
       for (let p = 0; p < 12; p++) {
         chroma[p] = chroma[p]! * (1 - audioBlend) + ac[p]! * audioBlend;
       }
       normalizeL2(chroma);
     }
-    peak = 0;
-    for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
-    const noteSparse = peak < 0.08;
 
-    const bass = lowestBassPc(bassNotes, w.startSec, w.endSec);
+    if (options.suppressDrone !== false) {
+      for (let p = 0; p < 12; p++) {
+        const d = droneStrength[p]!;
+        const nov = localNovelty[bi]![p]!;
+        const keep = nov > 0.4 ? 0.25 : 1;
+        chroma[p] = Math.max(0, chroma[p]! - 0.5 * d * keep * droneMean[p]!);
+      }
+      normalizeL2(chroma);
+    }
+
+    let peak = 0;
+    for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
+    const sparse = peak < 0.08 && !nt;
+
+    const bassHit = lowestBassPc(bassNotes, w.startSec, w.endSec);
     const proxy = lowestSustainedPc(accompanimentNotes, w.startSec, w.endSec, 58);
     const bassChroma = new Float32Array(12);
-    if (bass) {
-      bassChroma[bass.pc] = 1;
+    const nb = nnlsBassArr[bi];
+    if (nb && nnlsWeight > 0.2) {
+      bassChroma.set(nb);
+      if (bassHit) bassChroma[bassHit.pc]! += 0.35;
+    } else if (bassHit) {
+      bassChroma[bassHit.pc] = 1;
     } else if (proxy) {
       bassChroma[proxy.pc] = 1;
     } else {
@@ -409,18 +567,14 @@ export function detectChordsFromNotes(
     }
     normalizeL2(bassChroma);
 
-    if (noteSparse) {
+    if (sparse) {
       let hold: ChordLabel;
       if (observations.length > 0) {
         hold = { ...observations[observations.length - 1]!.candidates[0]!.label };
       } else {
-        // Seed from global key estimate (notes often denser later in the clip)
         const isMinor = key.endsWith('m');
         const p = parseChord(key);
-        hold = {
-          root: p?.root ?? 0,
-          quality: isMinor ? 'min' : 'maj',
-        };
+        hold = { root: p?.root ?? 0, quality: isMinor ? 'min' : 'maj' };
       }
       observations.push({
         startMs: w.startMs,
@@ -434,18 +588,20 @@ export function detectChordsFromNotes(
       keyPrior: key,
       keyConfidence,
       bassWeight: weakBass ? 0.55 : 1,
+      droneStrength,
+      localNovelty: localNovelty[bi],
     };
     const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, matchCtx);
     const candidates = raw.map((c) => {
       const withSlash = applyBassSlash(
         c.label,
-        weakBass ? null : (bass?.pc ?? null),
-        weakBass ? 0 : (bass?.weight ?? 0),
+        weakBass ? null : (bassHit?.pc ?? null),
+        weakBass ? 0 : (bassHit?.weight ?? 0),
         allowSlash && !weakBass,
       );
       return {
         label: simplifyLabel(withSlash, simplifyLevel),
-        score: c.score + (bass && bass.pc === c.label.root ? 0.04 : 0),
+        score: c.score + (bassHit && bassHit.pc === c.label.root ? 0.04 : 0),
       };
     });
     observations.push({ startMs: w.startMs, endMs: w.endMs, candidates });
@@ -455,7 +611,6 @@ export function detectChordsFromNotes(
     ? viterbiSmoothMetric(observations, downbeat.beatInBar, {
         selfBias: 0.58,
         sameRootBias: 0.2,
-        // change preferred at downbeat (0), ok at beat 3 (2), rare on 2/4
         changeCost: [-0.03, -0.3, -0.11, -0.27],
       })
     : viterbiSmoothMetric(
@@ -464,7 +619,6 @@ export function detectChordsFromNotes(
         { selfBias: 0.72 + (1 - simplifyLevel) * 0.1, changeCost: [-0.12, -0.12, -0.12, -0.12] },
       );
 
-  // Median-filter single-beat flips (keep metric structure)
   for (let i = 1; i < labels.length - 1; i++) {
     const a = formatChord(labels[i - 1]!, false);
     const b = formatChord(labels[i]!, false);
@@ -486,7 +640,6 @@ export function detectChordsFromNotes(
     }
   }
 
-  // Re-spell with key from chord roots
   const hist = new Float32Array(12);
   for (const c of chords) {
     const p = parseChord(c.chord);
@@ -511,6 +664,7 @@ export function detectChordsFromNotes(
     simplifyLevel,
     downbeatPhase: downbeat.phase,
     beatInBar: downbeat.beatInBar,
+    nnlsAnalysisMs,
   };
 }
 
@@ -523,17 +677,32 @@ export function detectChordsPreciseFromStems(
   bassNotes: NoteEvent[],
   options: PreciseDetectOptions = {},
 ): DetectionResult {
-  const instrumental = buildInstrumental(stems);
-  const durationMs = (instrumental.length / stems.sampleRate) * 1000;
+  const vocalResidual = options.vocalResidual ?? 0.25;
+  const vocals = stemToMono(stems.vocals.left, stems.vocals.right);
   const other = stemToMono(stems.other.left, stems.other.right);
   const bass = stemToMono(stems.bass.left, stems.bass.right);
+  let instrumental = buildInstrumental(stems);
+  if (vocalResidual > 0) {
+    instrumental = subtractVocalResidual(instrumental, vocals, vocalResidual);
+    let peak = 1e-6;
+    for (let i = 0; i < instrumental.length; i++) peak = Math.max(peak, Math.abs(instrumental[i]!));
+    const g = Math.min(1, 0.95 / peak);
+    for (let i = 0; i < instrumental.length; i++) instrumental[i]! *= g;
+  }
+  const durationMs = (instrumental.length / stems.sampleRate) * 1000;
   const bassEnergyRatio =
     options.bassEnergyRatio ?? rmsEnergy(bass) / Math.max(1e-9, rmsEnergy(other));
-  return detectChordsFromNotes(
+  const filteredOther = filterVocalLeakNotes(
     accompanimentNotes,
+    other,
+    vocals,
+    stems.sampleRate,
+  );
+  return detectChordsFromNotes(
+    filteredOther,
     bassNotes,
     durationMs,
-    { ...options, bassEnergyRatio },
+    { ...options, bassEnergyRatio, vocalSamples: vocals },
     {
       samples: instrumental,
       sampleRate: stems.sampleRate,

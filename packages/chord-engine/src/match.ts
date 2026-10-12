@@ -14,6 +14,14 @@ export interface MatchContext {
   bassWeight?: number;
   /** 0–1 scales out-of-key tone penalty. Default 0.55 when keyPrior set. */
   keyConfidence?: number;
+  /**
+   * Per-PC drone strength 0–1. Discounted for chord-identity scoring, but
+   * distinctive sus/7 tones that move vs neighbours are restored by caller
+   * (pass already-adjusted chroma) or via `localNovelty`.
+   */
+  droneStrength?: ArrayLike<number>;
+  /** Per-PC local novelty 0–1 (change vs neighbour beats). */
+  localNovelty?: ArrayLike<number>;
 }
 
 function nameToPc(n: string): number | null {
@@ -79,6 +87,69 @@ function outOfKeyTonePenalty(
   return pen;
 }
 
+/**
+ * Size-normalised template presence: mean energy on chord tones minus mean
+ * on non-tones. Fairer to sus4/7sus4 (3–4 tones) vs triads than raw cosine
+ * alone when drones inflate shared bins.
+ */
+export function templatePresenceScore(
+  chroma: ArrayLike<number>,
+  root: number,
+  quality: ChordQuality,
+): number {
+  const iv = QUALITY_INTERVALS[quality] ?? [0, 4, 7];
+  const on = new Set(iv.map((i) => (root + i) % 12));
+  let sumOn = 0;
+  let sumOff = 0;
+  let nOn = 0;
+  let nOff = 0;
+  for (let p = 0; p < 12; p++) {
+    if (on.has(p)) {
+      sumOn += chroma[p]!;
+      nOn++;
+    } else {
+      sumOff += chroma[p]!;
+      nOff++;
+    }
+  }
+  return (nOn ? sumOn / nOn : 0) - (nOff ? sumOff / nOff : 0);
+}
+
+/** Bonus when distinctive sus/7 intervals stand out vs competing triad tones. */
+function distinctiveIntervalBonus(
+  chroma: ArrayLike<number>,
+  root: number,
+  quality: ChordQuality,
+  peak: number,
+  localNovelty?: ArrayLike<number> | null,
+): number {
+  let bonus = 0;
+  const fourth = chroma[(root + 5) % 12]!;
+  const thirdM = chroma[(root + 4) % 12]!;
+  const thirdm = chroma[(root + 3) % 12]!;
+  const b7 = chroma[(root + 10) % 12]!;
+  const nov4 = localNovelty?.[(root + 5) % 12] ?? 0.5;
+  const nov7 = localNovelty?.[(root + 10) % 12] ?? 0.5;
+
+  if (quality === 'sus4' || quality === '7sus4') {
+    if (fourth > peak * 0.28 && fourth >= thirdM * 0.95 && fourth >= thirdm * 0.95) {
+      bonus += 0.1 + 0.06 * Math.min(1, nov4);
+    }
+    // Penalise plain maj/min confusion handled by their weaker 4th — boost sus
+    if (fourth > thirdM && fourth > thirdm) bonus += 0.04;
+  }
+  if (quality === '7' || quality === '7sus4' || quality === 'min7') {
+    if (b7 > peak * 0.22) bonus += 0.07 + 0.05 * Math.min(1, nov7);
+  }
+  if (quality === 'maj' || quality === 'min') {
+    // If a strong 4th is present without a clear 3rd, demote plain triad
+    if (fourth > peak * 0.4 && fourth > Math.max(thirdM, thirdm) * 1.15) {
+      bonus -= 0.08;
+    }
+  }
+  return bonus;
+}
+
 /** Top-k matches for Viterbi */
 export function topKMatches(
   chroma: ArrayLike<number>,
@@ -107,8 +178,34 @@ export function topKMatches(
   for (let i = 0; i < 12; i++) peak = Math.max(peak, chroma[i]!);
   const noisy = peak < 0.45;
 
+  const drone = ctx.droneStrength;
+  const novelty = ctx.localNovelty;
+
   for (const t of templates) {
-    let score = cosineSimilarity(chroma, t.vector);
+    // Blend cosine (shape) with size-normalised presence (fairer to sus/7sus4)
+    const cos = cosineSimilarity(chroma, t.vector);
+    const presence = templatePresenceScore(chroma, t.root, t.quality);
+    let score = 0.72 * cos + 0.28 * Math.max(-0.5, Math.min(1.2, presence));
+
+    // Soft drone discount on identity: reduce score contribution of static PCs
+    // unless they are distinctive chord tones with local novelty
+    if (drone) {
+      const iv = QUALITY_INTERVALS[t.quality] ?? [0, 4, 7];
+      let dronePen = 0;
+      for (const i of iv) {
+        const pc = (t.root + i) % 12;
+        const d = drone[pc] ?? 0;
+        const nov = novelty?.[pc] ?? 0;
+        // keep sus/7 tones when they move relative to neighbours
+        const keep =
+          (t.quality === 'sus4' || t.quality === '7sus4' || t.quality === '7') &&
+          (i === 5 || i === 10) &&
+          nov > 0.35;
+        if (d > 0.45 && !keep) dronePen += 0.025 * d;
+      }
+      score -= dronePen;
+    }
+
     // Bass: strongly prefer root in bass (separates F vs Am, etc.)
     const bassAgree = cosineSimilarity(bassChroma, t.bassBias);
     score += 0.22 * bassWeight * bassAgree;
@@ -128,8 +225,14 @@ export function topKMatches(
       }
       if (rel === 0) score += 0.06 * bassWeight;
     }
-    score -= complexityWeight * qualityComplexity(t.quality);
-    if (noisy && qualityComplexity(t.quality) >= 2) score -= 0.12;
+    // Milder complexity penalty for sus/7sus4 so they compete fairly with triads
+    let cq = qualityComplexity(t.quality);
+    if (t.quality === 'sus4' || t.quality === '7sus4') cq = Math.max(0, cq - 0.5);
+    score -= complexityWeight * cq;
+    if (noisy && cq >= 2) score -= 0.12;
+
+    score += distinctiveIntervalBonus(chroma, t.root, t.quality, peak, novelty);
+
     if (keyPrior) {
       if (useEnhancedKey) {
         score += 0.055 * keyConf * diatonicBonus(t.root, t.quality, keyPrior);
