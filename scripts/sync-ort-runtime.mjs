@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Copy onnxruntime-web WASM runtime (non-jsep) into web/public/ort/ for
  * same-origin loading. JSEP (~28 MiB) is intentionally omitted — it exceeds
@@ -7,6 +6,8 @@
  *
  * Also imported by the Vite `ensureOrtRuntime` plugin so `npm run dev -w web`
  * (which skips root `predev`) still gets a working `/ort/` tree.
+ *
+ * Run: `node scripts/sync-ort-runtime.mjs` (no shebang — Vite bundles this file).
  */
 import { copyFileSync, existsSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';

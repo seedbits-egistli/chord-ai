@@ -175,21 +175,12 @@ async function configureOrt(): Promise<void> {
           'Restart the Vite dev server so ensureOrtRuntime can copy files from node_modules.',
       );
     }
+    // Lightweight existence check — avoid downloading 14 MiB just to probe.
     const wasmProbe = await fetch(wasmUrl, { method: 'HEAD' });
     if (!wasmProbe.ok) {
-      // Some hosts lack HEAD — try GET range-less status via GET abort
-      const wasmGet = await fetch(wasmUrl, { method: 'GET' });
-      if (!wasmGet.ok) {
-        throw new Error(
-          `ORT wasm missing at ${wasmUrl} (${wasmGet.status}). Restart Vite or run: npm run sync:ort`,
-        );
-      }
-      // Drain/cancel body to avoid holding 14MiB
-      try {
-        await wasmGet.body?.cancel();
-      } catch {
-        /* ignore */
-      }
+      throw new Error(
+        `ORT wasm missing at ${wasmUrl} (${wasmProbe.status}). Restart Vite or run: npm run sync:ort`,
+      );
     }
     ortConfigured = true;
   })();
@@ -441,7 +432,7 @@ async function handleSeparate(msg: SeparateRequest) {
     post({
       id,
       type: 'progress',
-      progress: 0.98,
+      progress: 1,
       detail: '分離完成',
       fromCache: v.source !== 'network' && bassSource !== 'network',
     });

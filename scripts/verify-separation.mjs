@@ -73,9 +73,27 @@ async function main() {
         }
       }
     }
+    // Free the port so Vite does not silently move to 5174 while we poll 5173.
+    try {
+      spawn('fuser', ['-k', '5173/tcp'], { stdio: 'ignore' });
+    } catch {
+      /* ignore */
+    }
+    await sleep(500);
     viteProc = spawn(
       'npm',
-      ['run', 'dev', '-w', '@chord-ai/web', '--', '--host', 'localhost', '--port', '5173'],
+      [
+        'run',
+        'dev',
+        '-w',
+        '@chord-ai/web',
+        '--',
+        '--host',
+        'localhost',
+        '--port',
+        '5173',
+        '--strictPort',
+      ],
       {
         cwd: root,
         stdio: 'pipe',
@@ -190,8 +208,10 @@ async function main() {
     if (consoleErrors.length) {
       console.log('console errors:', consoleErrors.slice(0, 10));
     }
-    const ortRelatedFail = failedRequests.filter((u) =>
-      /ort-wasm|jsep|onnxruntime|\/ort\//i.test(u),
+    const ortRelatedFail = failedRequests.filter(
+      (u) =>
+        /ort-wasm|jsep|onnxruntime|\/ort\//i.test(u) &&
+        !/ERR_ABORTED|ERR_CACHE/i.test(u),
     );
     if (ortRelatedFail.length) {
       console.log('ORT-related failed requests:', ortRelatedFail.slice(0, 10));
