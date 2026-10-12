@@ -67,10 +67,17 @@ async function main() {
     });
     const page = await browser.newPage();
     const consoleErrors = [];
+    const failedRequests = [];
     page.on('console', (msg) => {
       if (msg.type() === 'error') consoleErrors.push(msg.text());
     });
     page.on('pageerror', (e) => consoleErrors.push(String(e)));
+    page.on('requestfailed', (req) => {
+      failedRequests.push(`${req.failure()?.errorText || 'fail'} ${req.url()}`);
+    });
+    page.on('response', (res) => {
+      if (res.status() >= 400) failedRequests.push(`${res.status()} ${res.url()}`);
+    });
 
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await page.waitForFunction(() => !!window.__chordAi?.separateInWorker);
@@ -139,11 +146,24 @@ async function main() {
     if (consoleErrors.length) {
       console.log('console errors:', consoleErrors.slice(0, 10));
     }
+    const ortRelatedFail = failedRequests.filter((u) =>
+      /ort-wasm|jsep|onnxruntime|\/ort\//i.test(u),
+    );
+    if (ortRelatedFail.length) {
+      console.log('ORT-related failed requests:', ortRelatedFail.slice(0, 10));
+      throw new Error(`ORT asset request failed: ${ortRelatedFail[0]}`);
+    }
+    const benign404 = failedRequests.filter(
+      (u) => !/favicon|apple-touch|manifest|\.map($|\?)/i.test(u),
+    );
+    if (benign404.length) {
+      console.log('other failed requests:', benign404.slice(0, 8));
+    }
 
     if (!result.ok) {
       throw new Error(`Separation failed: ${result.error}`);
     }
-    if (/no available backend|initWasm|Failed to fetch dynamically imported/i.test(
+    if (/no available backend|initWasm|Failed to fetch dynamically imported|jsep/i.test(
       JSON.stringify(result),
     )) {
       throw new Error('ORT backend error signature in result');
@@ -169,8 +189,19 @@ async function main() {
 
     console.log('OK — separation succeeded without fallback; ONNX cache works');
     await browser.close();
+    process.exit(0);
   } finally {
-    if (viteProc) viteProc.kill('SIGTERM');
+    if (viteProc) {
+      viteProc.kill('SIGTERM');
+      // Ensure Vite child tree dies even if SIGTERM is ignored
+      setTimeout(() => {
+        try {
+          viteProc.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }, 1500).unref?.();
+    }
   }
 }
 

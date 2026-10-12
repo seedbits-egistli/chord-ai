@@ -73,6 +73,13 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    port: 4173,
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'credentialless',
+    },
+  },
   worker: {
     format: 'es',
   },
