@@ -16,4 +16,6 @@ export * from './realFixtures.js';
 export * from './separate.js';
 export * from './stft.js';
 export * from './umx.js';
+export * from './preciseDetect.js';
+export * from './basicPitch.js';
 // loadAudio is Node/ffmpeg-only — import from './loadAudio.js' in scripts, not the browser bundle

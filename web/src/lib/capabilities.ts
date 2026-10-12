@@ -18,32 +18,47 @@ export async function hasWebGpu(): Promise<boolean> {
   }
 }
 
+export type UiDetectMode = 'fast' | 'precise';
+
 /**
- * Separation is an opt-in advanced mode — always default OFF.
- * Hint text still reflects device capability (WebGPU vs WASM).
+ * Default mode is always 快速. 精準 uses UMX + Basic Pitch (longer runtime).
  */
-export async function defaultSeparationEnabled(): Promise<{
-  enabled: boolean;
+export async function defaultDetectMode(): Promise<{
+  mode: UiDetectMode;
   webgpu: boolean;
   mobile: boolean;
   reason: string;
 }> {
   const mobile = isMobileUa();
   const webgpu = await hasWebGpu();
-  // Separation always uses ORT wasm EP from same-origin /ort/ (jsep/WebGPU
-  // omitted — exceeds Workers asset limit and breaks blob: import in workers).
   if (mobile) {
     return {
-      enabled: false,
+      mode: 'fast',
       webgpu,
       mobile,
-      reason: '進階模式預設關閉；行動裝置上 WASM 分離會較慢（模型約 34MB）',
+      reason: '精準模式在行動裝置上會較慢（UMX ~34MB + Basic Pitch 轉錄）',
     };
   }
   return {
-    enabled: false,
+    mode: 'fast',
     webgpu,
     mobile,
-    reason: '進階模式預設關閉；啟用後以同源 ORT WASM 執行 UMX-HQ（約 34MB，可快取）',
+    reason: '精準模式：UMX-HQ 分離 → Basic Pitch 音符 → 和弦推斷（可快取模型）',
+  };
+}
+
+/** @deprecated use defaultDetectMode */
+export async function defaultSeparationEnabled(): Promise<{
+  enabled: boolean;
+  webgpu: boolean;
+  mobile: boolean;
+  reason: string;
+}> {
+  const d = await defaultDetectMode();
+  return {
+    enabled: d.mode === 'precise',
+    webgpu: d.webgpu,
+    mobile: d.mobile,
+    reason: d.reason,
   };
 }

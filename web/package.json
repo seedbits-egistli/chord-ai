@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@audio/neural-transcribe": "^0.1.0",
     "@chord-ai/engine": "*",
     "@tombatossals/chords-db": "^0.5.1",
     "abcjs": "^6.4.4",

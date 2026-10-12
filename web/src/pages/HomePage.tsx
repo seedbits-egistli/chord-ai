@@ -14,10 +14,11 @@ import {
   getModelCacheStatus,
   prefetchModels,
   recordMicrophone,
+  type DetectMode,
   type ModelCacheStatus,
   type SeparateSources,
 } from '../lib/audio';
-import { defaultSeparationEnabled } from '../lib/capabilities';
+import { defaultDetectMode } from '../lib/capabilities';
 import { publishSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
@@ -62,8 +63,8 @@ export function HomePage() {
   const [artist, setArtist] = useState('');
   const [editLink, setEditLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [separate, setSeparate] = useState(false);
-  const [sepHint, setSepHint] = useState('偵測裝置能力中…');
+  const [mode, setMode] = useState<DetectMode>('fast');
+  const [modeHint, setModeHint] = useState('偵測裝置能力中…');
   const [webgpu, setWebgpu] = useState(false);
   const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
   const [lastSources, setLastSources] = useState<SeparateSources | null>(null);
@@ -86,18 +87,18 @@ export function HomePage() {
   }
 
   useEffect(() => {
-    void defaultSeparationEnabled().then((c) => {
-      setSeparate(c.enabled);
+    void defaultDetectMode().then((c) => {
+      setMode(c.mode);
       setWebgpu(c.webgpu);
-      setSepHint(c.reason);
+      setModeHint(c.reason);
     });
     void refreshCacheStatus();
   }, []);
 
   useEffect(() => {
-    if (!separate) return;
+    if (mode !== 'precise') return;
     void refreshCacheStatus();
-  }, [separate]);
+  }, [mode]);
 
   const view = useMemo(() => {
     if (!raw) return null;
@@ -204,17 +205,17 @@ export function HomePage() {
     setError(null);
     setProgress(5);
     setStatus(
-      separate
-        ? '進階模式：UMX-HQ 音源分離（音訊不離開此裝置）…'
-        : '正在分析和弦（瀏覽器內處理）…',
+      mode === 'precise'
+        ? '精準模式：分離 → Basic Pitch → 音符和弦（音訊不離開此裝置）…'
+        : '快速模式：正在分析和弦（瀏覽器內處理）…',
     );
     try {
       const result = await analyzeAudio(samples, sampleRate, {
-        separate,
+        mode,
         preferWebGpu: webgpu,
         detect: {
           simplifyLevel: simplify,
-          suppressDrone: !separate,
+          suppressDrone: mode === 'fast',
         },
         onProgress: (p, detail) => {
           setProgress(Math.round(p * 100));
@@ -235,15 +236,19 @@ export function HomePage() {
           : result.separateSources
             ? '；模型已寫入本機快取'
             : '';
+      const modeLabel = result.mode === 'precise' ? '精準' : '快速';
       if (result.separationError) {
-        setError(`音源分離失敗，已改用完整混音：${result.separationError}`);
+        setError(`精準模式部分失敗，已改用備援：${result.separationError}`);
         setStatus(
-          `完成（完整混音）：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊`,
+          `完成（${modeLabel}/備援）：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊${srcNote}`,
         );
       } else {
         setStatus(
-          `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
-            (result.usedSeparation ? `（已做人聲分離${srcNote}）` : '。'),
+          `完成（${modeLabel}）：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
+            (result.usedSeparation ? srcNote : '。') +
+            (result.noteCounts
+              ? `；音符 other=${result.noteCounts.other} bass=${result.noteCounts.bass}`
+              : ''),
         );
       }
     } catch (e) {
@@ -404,49 +409,66 @@ export function HomePage() {
               />
             </label>
           </div>
-          <label
+          <div
             style={{
-              display: 'flex',
-              gap: '0.5rem',
-              alignItems: 'flex-start',
               marginTop: '1rem',
               maxWidth: '36rem',
               fontSize: '0.92rem',
               color: 'var(--ink-soft)',
             }}
           >
-            <input
-              type="checkbox"
-              checked={separate}
-              disabled={busy || cacheBusy}
-              onChange={(e) => {
-                const on = e.target.checked;
-                setSeparate(on);
-                if (on) {
-                  setCacheBusy(true);
-                  void prefetchModels({
-                    preferWebGpu: webgpu,
-                    useBass: true,
-                    onProgress: (p, detail) => {
-                      setProgress(Math.round(p * 100));
-                      setStatus(detail);
-                    },
-                  })
-                    .then(() => refreshCacheStatus())
-                    .catch((err) =>
-                      setError(err instanceof Error ? err.message : String(err)),
-                    )
-                    .finally(() => setCacheBusy(false));
-                }
-              }}
-              style={{ marginTop: '0.2rem' }}
-            />
-            <span>
-              <strong style={{ color: 'var(--ink)' }}>進階模式：音源分離（UMX-HQ）</strong>
-              — 預設關閉。開啟後先去掉人聲再辨識和弦，並用貝斯軌強化根音。首次需下載約
-              34MB（之後存於本機 Cache Storage，可改託管於 R2）。{sepHint}
-            </span>
-          </label>
+            <div style={{ marginBottom: '0.35rem', color: 'var(--ink)' }}>
+              <strong>辨識模式</strong>
+            </div>
+            <div
+              role="radiogroup"
+              aria-label="辨識模式"
+              style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}
+            >
+              <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="detect-mode"
+                  checked={mode === 'fast'}
+                  disabled={busy || cacheBusy}
+                  onChange={() => setMode('fast')}
+                />
+                快速
+              </label>
+              <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="detect-mode"
+                  checked={mode === 'precise'}
+                  disabled={busy || cacheBusy}
+                  onChange={() => {
+                    setMode('precise');
+                    setCacheBusy(true);
+                    void prefetchModels({
+                      preferWebGpu: webgpu,
+                      useBass: true,
+                      onProgress: (p, detail) => {
+                        setProgress(Math.round(p * 100));
+                        setStatus(detail);
+                      },
+                    })
+                      .then(() => refreshCacheStatus())
+                      .catch((err) =>
+                        setError(err instanceof Error ? err.message : String(err)),
+                      )
+                      .finally(() => setCacheBusy(false));
+                  }}
+                />
+                精準
+              </label>
+            </div>
+            <p style={{ margin: '0.45rem 0 0', lineHeight: 1.45 }}>
+              {mode === 'fast'
+                ? '快速：完整混音色度比對（無需下載模型）。'
+                : '精準：UMX-HQ 分離 → Basic Pitch 轉錄伴奏/貝斯 → 音符和弦推斷（約 34MB + 0.2MB，可快取；較慢）。'}{' '}
+              {modeHint}
+            </p>
+          </div>
           <div
             style={{
               marginTop: '0.65rem',

@@ -13,7 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { loadAudioFile } from '../src/loadAudio.js';
 import { REAL_FIXTURES, phaseAlignedSegments } from '../src/realFixtures.js';
 import { detectChords } from '../src/detect.js';
-import { detectChordsFromStems } from '../src/separate.js';
+import { detectChordsFromStems, stereoToMono } from '../src/separate.js';
+import { detectChordsPreciseFromStems } from '../src/preciseDetect.js';
+import { transcribeNotes } from '../src/basicPitch.js';
 import { scoreAgainstTimedReference, scoreAgainstReference } from '../src/accuracy.js';
 import { FIXTURES } from '../src/fixtures.js';
 import { synthesizeFixture } from '../src/synthesize.js';
@@ -24,10 +26,11 @@ const root = join(__dirname, '../../..');
 
 const audioDir = process.env.CHORD_AI_TEST_AUDIO ?? '/tmp/chord-ai-test-audio';
 const wantSeparate = process.env.CHORD_AI_SEPARATE !== '0';
+const wantPrecise = process.env.CHORD_AI_PRECISE !== '0';
 const sepMaxSec = Number(process.env.CHORD_AI_SEP_MAX_SEC || 60);
 
 interface Row {
-  kind: 'synth' | 'real' | 'real-sep';
+  kind: 'synth' | 'real' | 'real-sep' | 'real-precise';
   title: string;
   artist: string;
   exactPct: number;
@@ -189,6 +192,91 @@ async function main() {
               .map((c) => `${c.chord}@${(c.tMs / 1000).toFixed(1)}s`)
               .join(' → '),
           );
+
+          if (wantPrecise) {
+            console.log('  Precise mode: Basic Pitch on other/bass…');
+            try {
+              const otherMono = stereoToMono(stems.other.left, stems.other.right);
+              const bassMono = stereoToMono(stems.bass.left, stems.bass.right);
+              const otherNotes = await transcribeNotes(otherMono, {
+                sampleRate: stems.sampleRate,
+                device: 'node',
+                minFreq: 80,
+                maxFreq: 1200,
+              });
+              const bassNotes = await transcribeNotes(bassMono, {
+                sampleRate: stems.sampleRate,
+                device: 'node',
+                minFreq: 30,
+                maxFreq: 350,
+              });
+              console.log(`  notes: other=${otherNotes.length} bass=${bassNotes.length}`);
+              const preciseResult = detectChordsPreciseFromStems(
+                stems,
+                otherNotes,
+                bassNotes,
+                {
+                  simplifyLevel: ref.id.includes('wonderwall') ? 0.35 : 0.45,
+                  bpmHint: ref.bpm,
+                  halfBar: true,
+                },
+              );
+              const precAligned = phaseAlignedSegments(ref, (segs) => {
+                const s = scoreAgainstTimedReference(preciseResult.chords, segs, {
+                  bpm: ref.bpm,
+                  maxOffsetMs: 8000,
+                  durationMs: sepMaxSec * 1000,
+                });
+                return s.majMinPct;
+              });
+              const precScore = scoreAgainstTimedReference(
+                preciseResult.chords,
+                precAligned,
+                {
+                  bpm: ref.bpm,
+                  maxOffsetMs: 8000,
+                  durationMs: sepMaxSec * 1000,
+                },
+              );
+              const precRow: Row = {
+                kind: 'real-precise',
+                title: `${ref.title} (+precise)`,
+                artist: ref.artist,
+                exactPct: round1(precScore.exactPct),
+                majMinPct: round1(precScore.majMinPct),
+                detectedKey: preciseResult.key,
+                refKey: ref.key,
+                beats: precScore.beats,
+                offsetMs: precScore.offsetMs,
+                note: `精準模式 UMX+Basic Pitch on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}`,
+              };
+              rows.push(precRow);
+              console.log(
+                `${ref.title} +precise (first ${sepMaxSec}s): exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key}`,
+              );
+              console.log(
+                '  detected:',
+                preciseResult.chords
+                  .slice(0, 16)
+                  .map((c) => `${c.chord}@${(c.tMs / 1000).toFixed(1)}s`)
+                  .join(' → '),
+              );
+            } catch (pe) {
+              console.warn('  Precise failed:', pe);
+              rows.push({
+                kind: 'real-precise',
+                title: `${ref.title} (+precise)`,
+                artist: ref.artist,
+                exactPct: NaN,
+                majMinPct: NaN,
+                detectedKey: '—',
+                refKey: ref.key,
+                beats: 0,
+                offsetMs: 0,
+                note: `Precise failed: ${pe instanceof Error ? pe.message : String(pe)}`,
+              });
+            }
+          }
         } catch (e) {
           console.warn('  Separation failed:', e);
           rows.push({
@@ -219,6 +307,7 @@ function writeDocs(rows: Row[]) {
   const synth = rows.filter((r) => r.kind === 'synth');
   const real = rows.filter((r) => r.kind === 'real');
   const sep = rows.filter((r) => r.kind === 'real-sep');
+  const precise = rows.filter((r) => r.kind === 'real-precise');
   const avg = (xs: Row[], k: 'exactPct' | 'majMinPct') => {
     const ok = xs.filter((r) => Number.isFinite(r[k]));
     return ok.length ? ok.reduce((s, r) => s + r[k], 0) / ok.length : 0;
@@ -235,14 +324,15 @@ function writeDocs(rows: Row[]) {
     '2. **Synthesized audio**: additive guitar-like tones at fixture BPM (`synthesizeChordProgression`).',
     '3. **Real audio (local only)**: `hey_jude.mp3` / `wonderwall.mp3` via `CHORD_AI_TEST_AUDIO` + ffmpeg. **Never committed.**',
     '4. **Wonderwall** scored in **sounding key** (capo 2 → F#m7–A–Esus4–B7sus4).',
-    '5. Optional **UMX-HQ** source separation (MIT, ~34 MiB vocals+bass ONNX, lazy download; **opt-in advanced mode**, default off in the UI) → instrumental chroma + bass stem. See [`docs/models.md`](./models.md).',
-    '6. Beat-level metrics with lag / loop-phase search:',
+    '5. **快速模式**: full-mix chroma templates (no ML download).',
+    '6. **精準模式** (UI opt-in): UMX-HQ separation → Basic Pitch (Apache-2.0, ~226 KiB ONNX) on `other`/`bass` → note-based chords (duration×velocity PC histogram, bass root/slash, drone suppress, key-aware Viterbi). No staff generation. See [`docs/models.md`](./models.md).',
+    '7. Beat-level metrics with lag / loop-phase search:',
     '   - **Exact**: root + quality family (maj≈maj7, min≈min7, sus≈7sus4).',
     '   - **Maj/min**: root + major/minor class only.',
     '',
     '```bash',
     'npm run validate -w @chord-ai/engine',
-    'CHORD_AI_TEST_AUDIO=/path/to/mp3s CHORD_AI_SEPARATE=1 CHORD_AI_SEP_MAX_SEC=60 \\',
+    'CHORD_AI_TEST_AUDIO=/path/to/mp3s CHORD_AI_SEPARATE=1 CHORD_AI_PRECISE=1 CHORD_AI_SEP_MAX_SEC=60 \\',
     '  npm run validate:real -w @chord-ai/engine',
     '```',
     '',
@@ -321,13 +411,51 @@ function writeDocs(rows: Row[]) {
       '',
       '### Accuracy vs size',
       '',
-      '| Separator | Download | License | Notes |',
+      '| Path | Download | License | Notes |',
       '|---|---:|---|---|',
-      '| Full mix (no sep) | 0 | — | Default path everywhere |',
-      '| **UMX-HQ vocals+bass** (current) | **~34 MiB** | MIT | Opt-in advanced mode |',
-      '| HTDemucs (previous) | ~172 MiB | MIT | Stronger vocal/drum removal; too heavy for frontend default |',
+      '| 快速 (full mix) | 0 | — | Default UI mode |',
+      '| UMX-HQ chroma | **~34 MiB** | MIT | Separation + chroma templates |',
+      '| **精準 (UMX + Basic Pitch)** | **~34.2 MiB** | MIT + Apache-2.0 | Note-based chords; staff unchanged |',
       '',
-      'Hey Jude usually improves once vocals are attenuated. Wonderwall’s capo-2 open-string drone remains in the residual/`bass` stems, so bar-level alignment vs equal 4-bar UG loops stays hard even after vocal removal (vocabulary A/F#m/E/B is still correct). UMX-HQ trades some separation quality vs HTDemucs for a ~5× smaller download.',
+    );
+  }
+
+  lines.push('## Fast vs precise (first N seconds)', '');
+  if (precise.length === 0) {
+    lines.push(
+      '_Precise not run. Set `CHORD_AI_PRECISE=1` (default on when separation runs)._',
+      '',
+    );
+  } else {
+    lines.push(
+      `Compared on the **first ${sepMaxSec}s** vs Ultimate Guitar–style references.`,
+      '',
+      '| Song | Fast (first Ns) exact % | Fast maj/min % | Precise exact % | Precise maj/min % | Δ maj/min | Detected key (precise) |',
+      '|---|---:|---:|---:|---:|---:|---|',
+    );
+    for (const r of precise) {
+      const baseTitle = r.title.replace(' (+precise)', '');
+      const base = real.find((x) => x.title === baseTitle);
+      let baseExact = NaN;
+      let baseMM = NaN;
+      const m = base?.note.match(/first\d+s exact ([\d.]+)% maj\/min ([\d.]+)%/);
+      if (m) {
+        baseExact = Number(m[1]);
+        baseMM = Number(m[2]);
+      }
+      const delta =
+        Number.isFinite(baseMM) && Number.isFinite(r.majMinPct)
+          ? (r.majMinPct - baseMM).toFixed(1)
+          : '—';
+      const deltaSigned =
+        delta === '—' ? '—' : `${Number(delta) >= 0 ? '+' : ''}${delta}`;
+      lines.push(
+        `| ${baseTitle} | ${fmt(baseExact)} | ${fmt(baseMM)} | ${fmt(r.exactPct)} | ${fmt(r.majMinPct)} | ${deltaSigned} | ${r.detectedKey} |`,
+      );
+    }
+    lines.push(
+      '',
+      `Average precise maj/min: **${avg(precise, 'majMinPct').toFixed(1)}%** (fast first-${sepMaxSec}s baseline from table notes).`,
       '',
     );
   }
@@ -336,8 +464,9 @@ function writeDocs(rows: Row[]) {
     '## Limitations',
     '',
     '- Non-ML template matching on commercial mixes trails ML; editor + simplify remain essential.',
-    '- UMX-HQ is opt-in advanced mode (default off): ~34 MiB download + CPU/GPU work.',
-    '- Separation validation uses a time-capped clip so the harness finishes in CI-like environments.',
+    '- 精準模式 is opt-in (default 快速): ~34 MiB UMX + ~0.2 MiB Basic Pitch + longer runtime.',
+    '- Separation / precise validation uses a time-capped clip so the harness finishes in CI-like environments.',
+    '- Staff notation UI is unchanged (still chord-timeline ABC); precise mode does not generate staff from notes.',
     '- **No commercial recordings are in git.**',
     '',
     `*Generated ${new Date().toISOString()} by \`npm run validate:real -w @chord-ai/engine\`.*`,

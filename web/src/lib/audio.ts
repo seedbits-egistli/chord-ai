@@ -6,15 +6,22 @@ import {
 } from '@chord-ai/engine';
 import type { WorkerRequest, WorkerResponse } from '../workers/chordWorker';
 import type {
+  PreciseRequest,
+  PreciseResponse,
+} from '../workers/preciseWorker';
+import type {
   SeparateRequest,
   SeparateResponse,
   WorkerRequest as SeparateWorkerRequest,
 } from '../workers/separateWorker';
 import type { CacheSource, CachedAssetInfo } from './assetCache';
 
+export type DetectMode = 'fast' | 'precise';
+
 type ChordGlobal = typeof globalThis & {
   __chordAiChordWorker?: Worker;
   __chordAiSeparateWorker?: Worker;
+  __chordAiPreciseWorker?: Worker;
   __chordAiSeq?: number;
 };
 
@@ -64,7 +71,21 @@ export function getSeparateWorker() {
   return g.__chordAiSeparateWorker;
 }
 
+export function getPreciseWorker() {
+  if (!g.__chordAiPreciseWorker) {
+    const w = new Worker(new URL('../workers/preciseWorker.ts', import.meta.url), {
+      type: 'module',
+    });
+    w.addEventListener('error', () => {
+      if (g.__chordAiPreciseWorker === w) g.__chordAiPreciseWorker = undefined;
+    });
+    g.__chordAiPreciseWorker = w;
+  }
+  return g.__chordAiPreciseWorker;
+}
+
 const SEPARATE_TIMEOUT_MS = 300_000;
+const PRECISE_TIMEOUT_MS = 600_000;
 
 export async function decodeFile(
   file: File,
@@ -306,12 +327,92 @@ function formatSources(sources: SeparateSources): string {
   return `模型：vocals ${part(sources.vocals)}、bass ${part(sources.bass)}、ORT ${part(sources.ort)}`;
 }
 
-/** Separate (optional) then detect — all in workers / local. */
+export function preciseFromStemsInWorker(
+  stems: SeparationStems,
+  options: {
+    simplifyLevel?: number;
+    bpmHint?: number;
+    timeoutMs?: number;
+    onProgress?: (progress: number, detail: string, fromCache?: boolean) => void;
+  } = {},
+): Promise<{
+  result: DetectionResult;
+  sources: { basicPitch: CacheSource };
+  noteCounts: { other: number; bass: number };
+}> {
+  const w = getPreciseWorker();
+  const id = nextId();
+  const timeoutMs = options.timeoutMs ?? PRECISE_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      w.removeEventListener('message', onMsg);
+      w.removeEventListener('error', onError);
+      fn();
+    };
+    const onError = (ev: ErrorEvent) => {
+      finish(() => reject(new Error(ev.message || 'Precise worker crashed')));
+    };
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(new Error(`Precise mode timed out after ${Math.round(timeoutMs / 1000)}s`)),
+      );
+    }, timeoutMs);
+    const onMsg = (ev: MessageEvent<PreciseResponse>) => {
+      const data = ev.data;
+      if (data.id !== id) return;
+      if ('type' in data && data.type === 'progress') {
+        options.onProgress?.(data.progress, data.detail, data.fromCache);
+        return;
+      }
+      if ('ok' in data && data.ok === false) {
+        finish(() => reject(new Error(data.error)));
+        return;
+      }
+      if (!('ok' in data) || !data.ok) {
+        finish(() => reject(new Error('Unexpected precise worker response')));
+        return;
+      }
+      finish(() =>
+        resolve({
+          result: data.result,
+          sources: data.sources,
+          noteCounts: data.noteCounts,
+        }),
+      );
+    };
+    w.addEventListener('message', onMsg);
+    w.addEventListener('error', onError);
+    const msg: PreciseRequest = {
+      type: 'precise',
+      id,
+      sampleRate: stems.sampleRate,
+      drumsL: stems.drums.left,
+      drumsR: stems.drums.right,
+      bassL: stems.bass.left,
+      bassR: stems.bass.right,
+      otherL: stems.other.left,
+      otherR: stems.other.right,
+      vocalsL: stems.vocals.left,
+      vocalsR: stems.vocals.right,
+      simplifyLevel: options.simplifyLevel,
+      bpmHint: options.bpmHint,
+    };
+    w.postMessage(msg);
+  });
+}
+
+/** Fast chroma detect, or precise (UMX → Basic Pitch → note chords). */
 export async function analyzeAudio(
   samples: Float32Array,
   sampleRate: number,
   options: {
-    separate: boolean;
+    /** @deprecated use `mode` — true maps to precise */
+    separate?: boolean;
+    mode?: DetectMode;
     preferWebGpu?: boolean;
     detect?: DetectOptions;
     onProgress?: (progress: number, detail: string, fromCache?: boolean) => void;
@@ -319,39 +420,81 @@ export async function analyzeAudio(
 ): Promise<
   DetectionResult & {
     usedSeparation: boolean;
+    mode: DetectMode;
     separateSources?: SeparateSources;
-    /** Set when separation failed and we fell back to full-mix detection. */
+    basicPitchSource?: CacheSource;
+    noteCounts?: { other: number; bass: number };
+    /** Set when separation/precise failed and we fell back to full-mix detection. */
     separationError?: string;
   }
 > {
-  if (!options.separate) {
-    options.onProgress?.(0.2, '和弦辨識中…');
+  const mode: DetectMode =
+    options.mode ?? (options.separate ? 'precise' : 'fast');
+
+  if (mode === 'fast') {
+    options.onProgress?.(0.2, '快速模式：和弦辨識中…');
     const result = await detectInWorker(samples, sampleRate, options.detect);
-    options.onProgress?.(1, '完成');
-    return { ...result, usedSeparation: false };
+    options.onProgress?.(1, '完成（快速模式）');
+    return { ...result, usedSeparation: false, mode: 'fast' };
   }
 
+  let stems: (SeparationStems & { sources: SeparateSources }) | null = null;
   try {
-    const stems = await separateInWorker(samples, sampleRate, {
+    options.onProgress?.(0.02, '精準模式：UMX-HQ 音源分離…');
+    stems = await separateInWorker(samples, sampleRate, {
       preferWebGpu: options.preferWebGpu,
-      onProgress: options.onProgress,
+      onProgress: (p, detail, fromCache) => {
+        options.onProgress?.(0.02 + p * 0.45, detail, fromCache);
+      },
     });
-    options.onProgress?.(0.97, '以人聲分離後的伴奏辨識和弦…');
-    const result = detectChordsFromStems(stems, options.detect);
-    options.onProgress?.(1, `完成（UMX-HQ；${formatSources(stems.sources)}）`);
-    return { ...result, usedSeparation: true, separateSources: stems.sources };
+    options.onProgress?.(0.5, '精準模式：Basic Pitch 轉錄…');
+    const precise = await preciseFromStemsInWorker(stems, {
+      simplifyLevel: options.detect?.simplifyLevel,
+      bpmHint: options.detect?.bpmHint,
+      onProgress: (p, detail, fromCache) => {
+        options.onProgress?.(0.5 + p * 0.5, detail, fromCache);
+      },
+    });
+    options.onProgress?.(
+      1,
+      `完成（精準模式；${formatSources(stems.sources)}；BP=${precise.sources.basicPitch}；音符 other=${precise.noteCounts.other} bass=${precise.noteCounts.bass}）`,
+    );
+    return {
+      ...precise.result,
+      usedSeparation: true,
+      mode: 'precise',
+      separateSources: stems.sources,
+      basicPitchSource: precise.sources.basicPitch,
+      noteCounts: precise.noteCounts,
+    };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.warn('Separation failed, falling back to full mix', e);
-    options.onProgress?.(0.55, `分離失敗：${msg} — 改用完整混音…`);
+    console.warn('Precise mode failed, falling back', e);
+    options.onProgress?.(0.7, `精準模式失敗：${msg} — 改用備援…`);
     try {
+      if (stems) {
+        const result = detectChordsFromStems(stems, options.detect);
+        options.onProgress?.(1, `完成（UMX 色度備援；精準失敗：${msg}）`);
+        return {
+          ...result,
+          usedSeparation: true,
+          mode: 'precise',
+          separateSources: stems.sources,
+          separationError: msg,
+        };
+      }
       const result = await detectInWorker(samples, sampleRate, options.detect);
-      options.onProgress?.(1, `完成（完整混音；分離失敗：${msg}）`);
-      return { ...result, usedSeparation: false, separationError: msg };
+      options.onProgress?.(1, `完成（完整混音；精準失敗：${msg}）`);
+      return {
+        ...result,
+        usedSeparation: false,
+        mode: 'fast',
+        separationError: msg,
+      };
     } catch (detectErr) {
       options.onProgress?.(1, '分析失敗');
       const d = detectErr instanceof Error ? detectErr.message : String(detectErr);
-      throw new Error(`分離失敗（${msg}）；完整混音辨識也失敗（${d}）`);
+      throw new Error(`精準模式失敗（${msg}）；備援辨識也失敗（${d}）`);
     }
   }
 }
