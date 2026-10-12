@@ -3,6 +3,7 @@ import {
   detectChordsFromNotes,
   findDronePcs,
   lowestBassPc,
+  lowestSustainedPc,
   noteChroma,
   type NoteEvent,
 } from '../src/preciseDetect.js';
@@ -30,6 +31,17 @@ describe('preciseDetect helpers', () => {
     const bass = [note(0, 1, 43, 0.9), note(0, 0.5, 55, 1)]; // G2 + G3
     const b = lowestBassPc(bass, 0, 1);
     expect(b?.pc).toBe(7);
+  });
+
+  it('derives lowest sustained PC from accompaniment when bass is absent', () => {
+    // Ringing open A2 + short high notes
+    const notes = [
+      note(0, 0.9, 45, 0.8), // A2 sustained
+      note(0.1, 0.15, 64, 0.9), // E4 flick
+      note(0.3, 0.2, 69, 0.7), // A4
+    ];
+    const b = lowestSustainedPc(notes, 0, 1, 62);
+    expect(b?.pc).toBe(9); // A
   });
 
   it('flags only very persistent drone pitch classes', () => {

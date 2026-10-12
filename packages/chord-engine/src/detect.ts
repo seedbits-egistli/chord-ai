@@ -3,11 +3,12 @@ import {
   computeChromaFrames,
   estimateTuningCents,
   normalizeL2,
+  rmsEnergy,
 } from './chroma.js';
 import { trackBeats } from './beats.js';
 import { detectKey, globalChromaFromFrames } from './key.js';
 import { formatChord, parseChord, simplifyLabel } from './chordParse.js';
-import { topKMatches, viterbiSmooth } from './match.js';
+import { topKMatches, viterbiSmooth, type MatchContext } from './match.js';
 import type { ChordEvent, ChordLabel, DetectOptions, DetectionResult } from './types.js';
 
 /**
@@ -37,8 +38,13 @@ export function detectChords(
     };
   }
 
-  // Optional bass stem → replace per-frame bass chroma
+  // Optional bass stem → replace per-frame bass chroma (blend when stem is weak)
+  let bassWeight = 1;
+  let weakBass = false;
   if (options.bassSamples && options.bassSamples.length > 0) {
+    const ratio = rmsEnergy(options.bassSamples) / Math.max(1e-9, rmsEnergy(samples));
+    weakBass = ratio < 0.15;
+    bassWeight = weakBass ? Math.max(0.35, Math.min(0.55, ratio / 0.12)) : 1;
     const bassFrames = computeChromaFrames(
       options.bassSamples,
       sampleRate,
@@ -48,7 +54,17 @@ export function detectChords(
     );
     const n = Math.min(frames.length, bassFrames.length);
     for (let i = 0; i < n; i++) {
-      frames[i]!.bassChroma = bassFrames[i]!.chroma;
+      if (weakBass) {
+        const blended = new Float32Array(12);
+        for (let p = 0; p < 12; p++) {
+          // Prefer low-band mix chroma when UMX bass is guitar thumps only
+          blended[p] = bassFrames[i]!.chroma[p]! * 0.3 + frames[i]!.bassChroma[p]! * 0.7;
+        }
+        normalizeL2(blended);
+        frames[i]!.bassChroma = blended;
+      } else {
+        frames[i]!.bassChroma = bassFrames[i]!.chroma;
+      }
     }
   }
 
@@ -56,6 +72,7 @@ export function detectChords(
   if (suppressDrone && frames.length > 8) {
     const mean = new Float32Array(12);
     const win = 24;
+    const amount = weakBass ? 0.75 : 0.7;
     for (let i = 0; i < frames.length; i++) {
       mean.fill(0);
       let c = 0;
@@ -66,7 +83,7 @@ export function detectChords(
         c++;
       }
       for (let p = 0; p < 12; p++) {
-        frames[i]!.chroma[p] = Math.max(0, frames[i]!.chroma[p]! - 0.7 * (mean[p]! / c));
+        frames[i]!.chroma[p] = Math.max(0, frames[i]!.chroma[p]! - amount * (mean[p]! / c));
       }
       normalizeL2(frames[i]!.chroma);
     }
@@ -103,7 +120,13 @@ export function detectChords(
       });
       continue;
     }
-    const candidates = topKMatches(chroma, bassChroma, simplifyLevel, 8, key);
+    const candidates =
+      options.bassSamples && weakBass
+        ? topKMatches(chroma, bassChroma, simplifyLevel, 8, {
+            keyPrior: key,
+            bassWeight,
+          } satisfies MatchContext)
+        : topKMatches(chroma, bassChroma, simplifyLevel, 8, key);
     observations.push({ startMs, endMs: obsEnd, candidates });
   }
 

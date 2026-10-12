@@ -15,6 +15,7 @@ import {
   computeChromaFrames,
   estimateTuningCents,
   normalizeL2,
+  rmsEnergy,
 } from './chroma.js';
 import { formatChord, parseChord, simplifyLabel } from './chordParse.js';
 import { detectKey } from './key.js';
@@ -42,6 +43,8 @@ export interface PreciseDetectOptions extends DetectOptions {
   audioChromaBlend?: number;
   /** Emit slash chords when bass ≠ root. Default true. */
   allowSlash?: boolean;
+  /** Bass/other RMS ratio; low values trigger guitar-only root proxy. */
+  bassEnergyRatio?: number;
 }
 
 function midiToPc(midi: number): number {
@@ -105,6 +108,53 @@ export function lowestBassPc(
     pc: midiToPc(best.midi),
     midi: best.midi,
     weight: Math.max(0, overlap) * (0.25 + 0.75 * best.velocity),
+  };
+}
+
+/**
+ * Lowest sustained pitch-class from accompaniment (weak-bass / guitar-only proxy).
+ */
+export function lowestSustainedPc(
+  notes: NoteEvent[],
+  startSec: number,
+  endSec: number,
+  maxMidi = 58,
+): { pc: number; midi: number; weight: number } | null {
+  const hits = notesInWindow(notes, startSec, endSec).filter((n) => n.midi <= maxMidi);
+  if (!hits.length) return null;
+  const pcWeight = new Float32Array(12);
+  const pcMidi = new Float32Array(12);
+  const pcMidiW = new Float32Array(12);
+  const win = Math.max(1e-3, endSec - startSec);
+  for (const n of hits) {
+    const n0 = n.time;
+    const n1 = n.time + Math.max(0.01, n.duration);
+    const overlap = Math.min(n1, endSec) - Math.max(n0, startSec);
+    if (overlap < 0.05) continue;
+    const pc = midiToPc(n.midi);
+    const lowBias = 1.15 - Math.min(1, Math.max(0, (n.midi - 36) / 28)) * 0.45;
+    const w =
+      (overlap / win) *
+      (0.3 + 0.7 * n.velocity) *
+      lowBias *
+      (0.5 + Math.min(1, n.duration));
+    pcWeight[pc]! += w;
+    pcMidi[pc]! += n.midi * w;
+    pcMidiW[pc]! += w;
+  }
+  let bestPc = -1;
+  let bestW = 0;
+  for (let p = 0; p < 12; p++) {
+    if (pcWeight[p]! > bestW) {
+      bestW = pcWeight[p]!;
+      bestPc = p;
+    }
+  }
+  if (bestPc < 0 || bestW < 0.02) return null;
+  return {
+    pc: bestPc,
+    midi: pcMidiW[bestPc]! > 0 ? pcMidi[bestPc]! / pcMidiW[bestPc]! : 48,
+    weight: bestW,
   };
 }
 
@@ -273,6 +323,9 @@ export function detectChordsFromNotes(
 
   let key = estimateKeyFromNoteHist(allNotes.length ? allNotes : accompanimentNotes);
 
+  const bassEnergyRatio = options.bassEnergyRatio ?? 1;
+  const weakBass = bassEnergyRatio < 0.15;
+
   const observations: BeatObservation[] = [];
   for (const w of windows) {
     let chroma = noteChroma(accompanimentNotes, w.startSec, w.endSec, hardDrones);
@@ -285,7 +338,8 @@ export function detectChordsFromNotes(
       for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     }
     if (options.suppressDrone !== false) {
-      subtractDroneMean(chroma, droneMean, 0.55);
+      // Stronger open-string drone discount when bass stem is weak/absent
+      subtractDroneMean(chroma, droneMean, weakBass ? 0.62 : 0.55);
     }
     if (audioFrames && audioBlend > 0) {
       const ac = averageChroma(audioFrames, w.startMs, w.endMs).chroma;
@@ -298,11 +352,14 @@ export function detectChordsFromNotes(
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
 
     const bass = lowestBassPc(bassNotes, w.startSec, w.endSec);
+    const proxy = lowestSustainedPc(accompanimentNotes, w.startSec, w.endSec, 58);
     const bassChroma = new Float32Array(12);
     if (bass) {
       bassChroma[bass.pc] = 1;
+    } else if (proxy) {
+      // Guitar-only windows with no bass-stem notes
+      bassChroma[proxy.pc] = 1;
     } else {
-      // Soft bass prior from lowest accompaniment notes
       const lows = notesInWindow(accompanimentNotes, w.startSec, w.endSec)
         .filter((n) => n.midi < 55)
         .sort((a, b) => a.midi - b.midi);
@@ -324,13 +381,15 @@ export function detectChordsFromNotes(
       continue;
     }
 
+    // Keep legacy keyPrior string scoring; aug guard is inside match.ts.
+    // When bass is weak: no slash chords (thumpy false bass).
     const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, key);
     const candidates = raw.map((c) => {
       const withSlash = applyBassSlash(
         c.label,
-        bass?.pc ?? null,
-        bass?.weight ?? 0,
-        allowSlash,
+        weakBass ? null : (bass?.pc ?? null),
+        weakBass ? 0 : (bass?.weight ?? 0),
+        allowSlash && !weakBass,
       );
       return {
         label: simplifyLabel(withSlash, simplifyLevel),
@@ -394,10 +453,20 @@ export function detectChordsPreciseFromStems(
 ): DetectionResult {
   const instrumental = buildInstrumental(stems);
   const durationMs = (instrumental.length / stems.sampleRate) * 1000;
-  return detectChordsFromNotes(accompanimentNotes, bassNotes, durationMs, options, {
-    samples: instrumental,
-    sampleRate: stems.sampleRate,
-  });
+  const other = stemToMono(stems.other.left, stems.other.right);
+  const bass = stemToMono(stems.bass.left, stems.bass.right);
+  const bassEnergyRatio =
+    options.bassEnergyRatio ?? rmsEnergy(bass) / Math.max(1e-9, rmsEnergy(other));
+  return detectChordsFromNotes(
+    accompanimentNotes,
+    bassNotes,
+    durationMs,
+    { ...options, bassEnergyRatio },
+    {
+      samples: instrumental,
+      sampleRate: stems.sampleRate,
+    },
+  );
 }
 
 /** Merge stereo stem to mono for transcription. */

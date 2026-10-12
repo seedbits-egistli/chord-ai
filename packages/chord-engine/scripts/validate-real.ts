@@ -16,10 +16,15 @@ import { detectChords } from '../src/detect.js';
 import { detectChordsFromStems, stereoToMono } from '../src/separate.js';
 import { detectChordsPreciseFromStems } from '../src/preciseDetect.js';
 import { transcribeNotes } from '../src/basicPitch.js';
-import { scoreAgainstTimedReference, scoreAgainstReference } from '../src/accuracy.js';
+import {
+  scoreAgainstTimedReference,
+  scoreAgainstReference,
+  toneOverlap,
+} from '../src/accuracy.js';
 import { FIXTURES } from '../src/fixtures.js';
 import { synthesizeFixture } from '../src/synthesize.js';
 import { separateMonoNode } from './separate-node.js';
+import type { ChordEvent } from '../src/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '../../..');
@@ -28,6 +33,21 @@ const audioDir = process.env.CHORD_AI_TEST_AUDIO ?? '/tmp/chord-ai-test-audio';
 const wantSeparate = process.env.CHORD_AI_SEPARATE !== '0';
 const wantPrecise = process.env.CHORD_AI_PRECISE !== '0';
 const sepMaxSec = Number(process.env.CHORD_AI_SEP_MAX_SEC || 60);
+
+/** Previous headline numbers (tone %) before tuning + weak-bass fixes — for docs before/after. */
+const BEFORE_TONE = {
+  'Hey Jude': { fast: 57.6, precise: 86.4 },
+  Wonderwall: { fast: 42.5, precise: 42.8 },
+} as const;
+
+interface SectionTone {
+  name: string;
+  tonePct: number;
+  jaccardPct: number;
+  recallPct: number;
+  rootPct: number;
+  n: number;
+}
 
 interface Row {
   kind: 'synth' | 'real' | 'real-sep' | 'real-precise';
@@ -45,6 +65,72 @@ interface Row {
   beats: number;
   offsetMs: number;
   note: string;
+  sections?: SectionTone[];
+}
+
+function chordAt(events: ChordEvent[], tMs: number): string {
+  for (const e of events) {
+    if (tMs >= e.tMs && tMs < e.endMs) return e.chord;
+  }
+  let best = events[0]?.chord ?? 'N';
+  let bestDist = Infinity;
+  for (const e of events) {
+    const mid = (e.tMs + e.endMs) / 2;
+    const d = Math.abs(mid - tMs);
+    if (d < bestDist) {
+      bestDist = d;
+      best = e.chord;
+    }
+  }
+  return best;
+}
+
+function refAtMs(
+  segs: Array<{ chord: string; startMs: number; endMs: number }>,
+  tMs: number,
+): string {
+  for (const s of segs) {
+    if (tMs >= s.startMs && tMs < s.endMs) return s.chord;
+  }
+  return 'N';
+}
+
+/** Beat-grid tone overlap for time ranges (Wonderwall intro/verse). */
+function sectionToneScores(
+  detected: ChordEvent[],
+  aligned: Array<{ chord: string; startMs: number; endMs: number }>,
+  bpm: number,
+  durationMs: number,
+  ranges: Array<{ name: string; startMs: number; endMs: number }>,
+): SectionTone[] {
+  const beatMs = 60000 / bpm;
+  return ranges.map((r) => {
+    let tone = 0;
+    let jac = 0;
+    let rec = 0;
+    let root = 0;
+    let n = 0;
+    for (let t = r.startMs + beatMs * 0.5; t < Math.min(r.endMs, durationMs); t += beatMs) {
+      const ref = refAtMs(aligned, t);
+      if (ref === 'N') continue;
+      const hyp = chordAt(detected, t);
+      const o = toneOverlap(ref, hyp);
+      tone += o.weighted;
+      jac += o.jaccard;
+      rec += o.recall;
+      if (o.rootMatch) root++;
+      n++;
+    }
+    const d = n || 1;
+    return {
+      name: r.name,
+      tonePct: round1((100 * tone) / d),
+      jaccardPct: round1((100 * jac) / d),
+      recallPct: round1((100 * rec) / d),
+      rootPct: round1((100 * root) / d),
+      n,
+    };
+  });
 }
 
 function toneFields(score: {
@@ -153,6 +239,20 @@ async function main() {
         maxOffsetMs: 8000,
         durationMs: Math.min(sepMaxSec * 1000, fullDur),
       });
+      const sections =
+        ref.id.includes('wonderwall')
+          ? sectionToneScores(
+              result.chords,
+              aligned,
+              ref.bpm,
+              Math.min(sepMaxSec * 1000, fullDur),
+              [
+                { name: 'intro(0–16s)', startMs: 0, endMs: 16000 },
+                { name: 'verse(16–45s)', startMs: 16000, endMs: 45000 },
+                { name: 'late(45–60s)', startMs: 45000, endMs: sepMaxSec * 1000 },
+              ],
+            )
+          : undefined;
       const row: Row = {
         kind: 'real',
         title: ref.title,
@@ -161,12 +261,19 @@ async function main() {
         detectedKey: result.key,
         refKey: ref.key,
         note: `${ref.source} | first${sepMaxSec}s tone ${round1(headScore.toneOverlapPct)}% (J=${round1(headScore.toneJaccardPct)} R=${round1(headScore.toneRecallPct)} root=${round1(headScore.rootMatchPct)}) exact ${round1(headScore.exactPct)}% maj/min ${round1(headScore.majMinPct)}%`,
+        sections,
       };
       rows.push(row);
       realBaseline.push(row);
       console.log(
         `${ref.title} baseline: tone ${row.toneOverlapPct}% | exact ${row.exactPct}% maj/min ${row.majMinPct}% | first${sepMaxSec}s tone ${round1(headScore.toneOverlapPct)}% exact ${round1(headScore.exactPct)}/${round1(headScore.majMinPct)} | key ${result.key}`,
       );
+      if (sections?.length) {
+        console.log(
+          '  sections (fast):',
+          sections.map((s) => `${s.name} tone ${s.tonePct}%`).join(' | '),
+        );
+      }
 
       if (wantSeparate) {
         console.log(`  Separating first ${sepMaxSec}s with UMX-HQ (CPU)…`);
@@ -268,6 +375,20 @@ async function main() {
                   durationMs: sepMaxSec * 1000,
                 },
               );
+              const sections =
+                ref.id.includes('wonderwall')
+                  ? sectionToneScores(
+                      preciseResult.chords,
+                      precAligned,
+                      ref.bpm,
+                      sepMaxSec * 1000,
+                      [
+                        { name: 'intro(0–16s)', startMs: 0, endMs: 16000 },
+                        { name: 'verse(16–45s)', startMs: 16000, endMs: 45000 },
+                        { name: 'late(45–60s)', startMs: 45000, endMs: sepMaxSec * 1000 },
+                      ],
+                    )
+                  : undefined;
               const precRow: Row = {
                 kind: 'real-precise',
                 title: `${ref.title} (+precise)`,
@@ -276,11 +397,18 @@ async function main() {
                 detectedKey: preciseResult.key,
                 refKey: ref.key,
                 note: `精準模式 UMX+Basic Pitch on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}`,
+                sections,
               };
               rows.push(precRow);
               console.log(
                 `${ref.title} +precise (first ${sepMaxSec}s): tone ${precRow.toneOverlapPct}% (J=${precRow.toneJaccardPct} R=${precRow.toneRecallPct} root=${precRow.rootMatchPct}) exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key}`,
               );
+              if (sections?.length) {
+                console.log(
+                  '  sections:',
+                  sections.map((s) => `${s.name} tone ${s.tonePct}% (n=${s.n})`).join(' | '),
+                );
+              }
               console.log(
                 '  detected:',
                 preciseResult.chords
@@ -505,6 +633,66 @@ function writeDocs(rows: Row[]) {
       `Average precise **tone overlap**: **${avg(precise, 'toneOverlapPct').toFixed(1)}%** (J=${avg(precise, 'toneJaccardPct').toFixed(1)}, R=${avg(precise, 'toneRecallPct').toFixed(1)}, root=${avg(precise, 'rootMatchPct').toFixed(1)}; exact ${avg(precise, 'exactPct').toFixed(1)} / majmin ${avg(precise, 'majMinPct').toFixed(1)}).`,
       '',
     );
+
+    // Before/after table (tuning + weak-bass fixes)
+    lines.push('### Before / after (tuning + weak-bass)');
+    lines.push('');
+    lines.push(
+      'Fixes: rewritten `estimateTuningCents` (many frames, parabolic peak interpolation, energy-weighted circular mean, 1¢ resolution — Wonderwall first-60s ≈ **+7¢**, Hey Jude ≈ **−9¢**, was wrongly ~+45¢); weak-bass path uses lowest sustained `other` notes / low-band chroma blend, down-weights bass prior, stronger drone subtract, aug guard against neighbor-semitone flips; no slash when bass stem is weak.',
+    );
+    lines.push('');
+    lines.push(
+      'Fast-mode first-60s drops after the tuning fix are expected (chroma was previously warped); **precise Hey Jude must not regress** (headline path).',
+    );
+    lines.push('');
+    lines.push('| Song | Mode | Before tone % | After tone % | Δ |');
+    lines.push('|---|---|---:|---:|---:|');
+    for (const r of precise) {
+      const baseTitle = r.title.replace(' (+precise)', '') as keyof typeof BEFORE_TONE;
+      const before = BEFORE_TONE[baseTitle];
+      const base = real.find((x) => x.title === baseTitle);
+      const sepRow = sep.find((x) => x.title === `${baseTitle} (+UMX-HQ)`);
+      let fastTone = NaN;
+      const m = base?.note.match(/first\d+s tone ([\d.]+)%/);
+      if (m) fastTone = Number(m[1]);
+      if (before) {
+        const dFast = Number.isFinite(fastTone)
+          ? `${fastTone - before.fast >= 0 ? '+' : ''}${(fastTone - before.fast).toFixed(1)}`
+          : '—';
+        const dPrec = `${r.toneOverlapPct - before.precise >= 0 ? '+' : ''}${(r.toneOverlapPct - before.precise).toFixed(1)}`;
+        lines.push(
+          `| ${baseTitle} | Fast (first ${sepMaxSec}s) | ${before.fast.toFixed(1)} | ${fmt(fastTone)} | ${dFast} |`,
+        );
+        if (sepRow && Number.isFinite(sepRow.toneOverlapPct)) {
+          lines.push(
+            `| ${baseTitle} | UMX-HQ chroma | — | ${fmt(sepRow.toneOverlapPct)} | — |`,
+          );
+        }
+        lines.push(
+          `| ${baseTitle} | Precise | ${before.precise.toFixed(1)} | **${fmt(r.toneOverlapPct)}** | ${dPrec} |`,
+        );
+      }
+    }
+    lines.push('');
+
+    // Wonderwall per-section
+    const wwFast = real.find((x) => x.title === 'Wonderwall');
+    const wwPrec = precise.find((x) => x.title.startsWith('Wonderwall'));
+    if (wwFast?.sections?.length || wwPrec?.sections?.length) {
+      lines.push('### Wonderwall per-section (first 60s, tone %)');
+      lines.push('');
+      lines.push('| Section | Fast tone % | Precise tone % | Fast J / R / root | Precise J / R / root |');
+      lines.push('|---|---:|---:|---|---|');
+      const names = ['intro(0–16s)', 'verse(16–45s)', 'late(45–60s)'];
+      for (const name of names) {
+        const f = wwFast?.sections?.find((s) => s.name === name);
+        const p = wwPrec?.sections?.find((s) => s.name === name);
+        lines.push(
+          `| ${name} | ${f ? f.tonePct.toFixed(1) : '—'} | ${p ? `**${p.tonePct.toFixed(1)}**` : '—'} | ${f ? `${f.jaccardPct} / ${f.recallPct} / ${f.rootPct}` : '—'} | ${p ? `${p.jaccardPct} / ${p.recallPct} / ${p.rootPct}` : '—'} |`,
+        );
+      }
+      lines.push('');
+    }
   }
 
   lines.push(

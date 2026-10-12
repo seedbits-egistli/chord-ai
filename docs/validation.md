@@ -39,9 +39,9 @@ CHORD_AI_TEST_AUDIO=/path/to/mp3s CHORD_AI_SEPARATE=1 CHORD_AI_PRECISE=1 CHORD_A
 
 | Song | Artist | Ref key | **Tone %** | Jaccard % | Recall % | Root % | Exact % | Maj/min % | Detected key | Notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|---|
-| Hey Jude | The Beatles | F | **64.8** | 64.0 | 69.2 | 53.7 | 53.7 | 53.7 | F | Ultimate Guitar–style / Drew Bentley (F): verse F–C–C–F–Bb–F–C–F; coda F–Eb–Bb–F. Phase-aligned loops. Local audio only. | first60s tone 57.6% (J=57 R=65.7 root=32.9) exact 32.9% maj/min 32.9% |
-| Wonderwall | Oasis | F#m | **48.6** | 47.4 | 54.6 | 34.9 | 24.3 | 28.7 | A | Ultimate Guitar Wonderwall capo 2; sounding F#m7–A–Esus4–B7sus4 (verse) / D–F#m7–A (chorus). Phase-aligned. Local audio only. | first60s tone 42.5% (J=40.4 R=46.9 root=38.2) exact 26.3% maj/min 38.2% |
-| **Average (full mix)** | | | **56.7** | 55.7 | 61.9 | 44.3 | 39.0 | 41.2 | | |
+| Hey Jude | The Beatles | F | **66.6** | 65.9 | 70.3 | 57.1 | 57.1 | 57.1 | Bb | Ultimate Guitar–style / Drew Bentley (F): verse F–C–C–F–Bb–F–C–F; coda F–Eb–Bb–F. Phase-aligned loops. Local audio only. | first60s tone 48.6% (J=47.8 R=56.8 root=24.3) exact 24.3% maj/min 24.3% |
+| Wonderwall | Oasis | F#m | **48.7** | 47.8 | 54.8 | 31.9 | 23.9 | 26.8 | A | Ultimate Guitar Wonderwall capo 2; sounding F#m7–A–Esus4–B7sus4 (verse) / D–F#m7–A (chorus). Phase-aligned. Local audio only. | first60s tone 37.7% (J=36.4 R=42.3 root=29.4) exact 21.2% maj/min 29.4% |
+| **Average (full mix)** | | | **57.6** | 56.9 | 62.5 | 44.5 | 40.5 | 42.0 | | |
 
 ## Before / after UMX-HQ (first N seconds)
 
@@ -49,8 +49,8 @@ Compared on the **first 60s** of each file (UMX-HQ on CPU in the harness; browse
 
 | Song | Baseline tone % | +UMX-HQ tone % | Δ tone | Baseline exact / majmin | +UMX exact / majmin |
 |---|---:|---:|---:|---:|---:|
-| Hey Jude | 57.6 | 94.3 | +36.7 | 32.9 / 32.9 | 92.6 / 92.6 |
-| Wonderwall | 42.5 | 45.8 | +3.3 | 26.3 / 38.2 | 13.4 / 23.2 |
+| Hey Jude | 48.6 | 92.6 | +44.0 | 24.3 / 24.3 | 88.2 / 88.2 |
+| Wonderwall | 37.7 | 57.2 | +19.5 | 21.2 / 29.4 | 20.3 / 21.6 |
 
 ### Accuracy vs size
 
@@ -66,10 +66,33 @@ Compared on the **first 60s** vs Ultimate Guitar–style references. **Tone % is
 
 | Song | Fast tone % | Precise tone % | Δ tone | Fast J / R / root | Precise J / R / root | Fast exact / majmin | Precise exact / majmin | Key (precise) |
 |---|---:|---:|---:|---|---|---|---|---|
-| Hey Jude | 57.6 | **86.4** | +28.8 | 57.0 / 65.7 / 32.9 | 85.9 / 88.2 / 82.4 | 32.9 / 32.9 | 82.4 / 82.4 | F |
-| Wonderwall | 42.5 | **42.8** | +0.3 | 40.4 / 46.9 / 38.2 | 40.4 / 49.2 / 32.9 | 26.3 / 38.2 | 30.3 / 32.9 | F#m |
+| Hey Jude | 48.6 | **86.4** | +37.8 | 47.8 / 56.8 / 24.3 | 85.9 / 88.2 / 82.4 | 24.3 / 24.3 | 82.4 / 82.4 | F |
+| Wonderwall | 37.7 | **42.1** | +4.4 | 36.4 / 42.3 / 29.4 | 40.1 / 47.9 / 32.9 | 21.2 / 29.4 | 30.3 / 32.9 | F#m |
 
-Average precise **tone overlap**: **64.6%** (J=63.2, R=68.7, root=57.7; exact 56.4 / majmin 57.7).
+Average precise **tone overlap**: **64.3%** (J=63.0, R=68.0, root=57.7; exact 56.4 / majmin 57.7).
+
+### Before / after (tuning + weak-bass)
+
+Fixes: rewritten `estimateTuningCents` (many frames, parabolic peak interpolation, energy-weighted circular mean, 1¢ resolution — Wonderwall first-60s ≈ **+7¢**, Hey Jude ≈ **−9¢**, was wrongly ~+45¢); weak-bass path uses lowest sustained `other` notes / low-band chroma blend, down-weights bass prior, stronger drone subtract, aug guard against neighbor-semitone flips; no slash when bass stem is weak.
+
+Fast-mode first-60s drops after the tuning fix are expected (chroma was previously warped); **precise Hey Jude must not regress** (headline path).
+
+| Song | Mode | Before tone % | After tone % | Δ |
+|---|---|---:|---:|---:|
+| Hey Jude | Fast (first 60s) | 57.6 | 48.6 | -9.0 |
+| Hey Jude | UMX-HQ chroma | — | 92.6 | — |
+| Hey Jude | Precise | 86.4 | **86.4** | +0.0 |
+| Wonderwall | Fast (first 60s) | 42.5 | 37.7 | -4.8 |
+| Wonderwall | UMX-HQ chroma | — | 57.2 | — |
+| Wonderwall | Precise | 42.8 | **42.1** | -0.7 |
+
+### Wonderwall per-section (first 60s, tone %)
+
+| Section | Fast tone % | Precise tone % | Fast J / R / root | Precise J / R / root |
+|---|---:|---:|---|---|
+| intro(0–16s) | 0.0 | **18.9** | 0 / 0 / 0 | 18.1 / 23.2 / 8.7 |
+| verse(16–45s) | 43.5 | **43.3** | 42.6 / 53.8 / 11.9 | 41.8 / 52 / 21.4 |
+| late(45–60s) | 43.1 | **30.5** | 42.3 / 51.5 / 18.2 | 29.8 / 36.4 / 13.6 |
 
 ## Limitations
 
@@ -80,4 +103,4 @@ Average precise **tone overlap**: **64.6%** (J=63.2, R=68.7, root=57.7; exact 56
 - Staff notation UI is unchanged (still chord-timeline ABC); precise mode does not generate staff from notes.
 - **No commercial recordings are in git.**
 
-*Generated 2026-10-12T13:43:53.287Z by `npm run validate:real -w @chord-ai/engine`.*
+*Generated 2026-10-12T14:15:23.128Z by `npm run validate:real -w @chord-ai/engine`.*

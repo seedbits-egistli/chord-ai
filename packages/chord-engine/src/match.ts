@@ -7,6 +7,13 @@ export interface MatchCandidate {
   score: number;
 }
 
+/** Optional match priors. Passing a string keyPrior keeps legacy behavior (+ aug guard). */
+export interface MatchContext {
+  keyPrior?: string;
+  /** Scales bass agreement (default 1). Lower when bass stem energy is weak. */
+  bassWeight?: number;
+}
+
 function nameToPc(n: string): number | null {
   const map: Record<string, number> = {
     C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3, E: 4, F: 5,
@@ -40,8 +47,15 @@ export function topKMatches(
   bassChroma: ArrayLike<number>,
   simplifyLevel: number,
   k = 5,
-  keyPrior?: string,
+  keyPriorOrCtx?: string | MatchContext,
 ): MatchCandidate[] {
+  const ctx: MatchContext =
+    typeof keyPriorOrCtx === 'string' || keyPriorOrCtx === undefined
+      ? { keyPrior: keyPriorOrCtx }
+      : keyPriorOrCtx;
+  const keyPrior = ctx.keyPrior;
+  const bassWeight = Math.max(0, Math.min(1.5, ctx.bassWeight ?? 1));
+
   const templates = getTemplates();
   const scored: MatchCandidate[] = [];
   const complexityWeight = 0.05 + simplifyLevel * 0.28;
@@ -55,7 +69,7 @@ export function topKMatches(
     let score = cosineSimilarity(chroma, t.vector);
     // Bass: strongly prefer root in bass (separates F vs Am, etc.)
     const bassAgree = cosineSimilarity(bassChroma, t.bassBias);
-    score += 0.22 * bassAgree;
+    score += 0.22 * bassWeight * bassAgree;
     // Soft penalty if dominant bass PC is far from root/third/fifth
     let bassPc = 0;
     let bassPeak = -1;
@@ -65,14 +79,27 @@ export function topKMatches(
         bassPc = i;
       }
     }
-    if (bassPeak > 0.25) {
+    if (bassPeak > 0.25 && bassWeight > 0.15) {
       const rel = (bassPc - t.root + 12) % 12;
-      if (rel !== 0 && rel !== 3 && rel !== 4 && rel !== 7 && rel !== 10) score -= 0.08;
-      if (rel === 0) score += 0.06;
+      if (rel !== 0 && rel !== 3 && rel !== 4 && rel !== 7 && rel !== 10) {
+        score -= 0.08 * bassWeight;
+      }
+      if (rel === 0) score += 0.06 * bassWeight;
     }
     score -= complexityWeight * qualityComplexity(t.quality);
     if (noisy && qualityComplexity(t.quality) >= 2) score -= 0.12;
     if (keyPrior) score += 0.045 * diatonicBonus(t.root, t.quality, keyPrior);
+
+    // Guard: a single neighbor-semitone shouldn't invent aug (#5)
+    if (t.quality === 'aug') {
+      const sharp5 = chroma[(t.root + 8) % 12]!;
+      const fifth = chroma[(t.root + 7) % 12]!;
+      const rootE = chroma[t.root]!;
+      if (sharp5 < peak * 0.6 || sharp5 < fifth * 0.95 || sharp5 < rootE * 0.7) {
+        score -= 0.25;
+      }
+    }
+
     scored.push({ label: { root: t.root, quality: t.quality }, score });
   }
   scored.sort((a, b) => b.score - a.score);
@@ -86,9 +113,9 @@ export function matchChord(
   chroma: ArrayLike<number>,
   bassChroma: ArrayLike<number>,
   simplifyLevel: number,
-  keyPrior?: string,
+  keyPriorOrCtx?: string | MatchContext,
 ): MatchCandidate {
-  return topKMatches(chroma, bassChroma, simplifyLevel, 1, keyPrior)[0]!;
+  return topKMatches(chroma, bassChroma, simplifyLevel, 1, keyPriorOrCtx)[0]!;
 }
 
 export interface BeatObservation {
