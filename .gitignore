@@ -18,3 +18,5 @@ test-audio/
 fixtures/audio/
 docs/validation-results.json
 *.log
+*.onnx
+/tmp/

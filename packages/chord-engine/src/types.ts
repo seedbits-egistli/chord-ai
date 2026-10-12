@@ -59,6 +59,11 @@ export interface DetectOptions {
   bpmHint?: number;
   /** Subtract running-mean chroma to reduce guitar-drone bias */
   suppressDrone?: boolean;
+  /**
+   * Optional mono bass stem (same length/rate as `samples`) used for
+   * bass-chroma / root emphasis after source separation.
+   */
+  bassSamples?: Float32Array;
 }
 
 export interface ReferenceSegment {

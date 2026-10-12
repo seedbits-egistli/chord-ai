@@ -13,4 +13,5 @@ export * from './synthesize.js';
 export * from './accuracy.js';
 export * from './fixtures.js';
 export * from './realFixtures.js';
+export * from './separate.js';
 // loadAudio is Node/ffmpeg-only — import from './loadAudio.js' in scripts, not the browser bundle

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   applySimplify,
   suggestCapo,
@@ -7,7 +7,8 @@ import {
   type ChordEvent,
   type DetectionResult,
 } from '@chord-ai/engine';
-import { decodeFile, detectInWorker, recordMicrophone } from '../lib/audio';
+import { analyzeAudio, decodeFile, recordMicrophone } from '../lib/audio';
+import { defaultSeparationEnabled } from '../lib/capabilities';
 import { publishSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
@@ -36,6 +37,17 @@ export function HomePage() {
   const [artist, setArtist] = useState('');
   const [editLink, setEditLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [separate, setSeparate] = useState(false);
+  const [sepHint, setSepHint] = useState('偵測裝置能力中…');
+  const [webgpu, setWebgpu] = useState(false);
+
+  useEffect(() => {
+    void defaultSeparationEnabled().then((c) => {
+      setSeparate(c.enabled);
+      setWebgpu(c.webgpu);
+      setSepHint(c.reason);
+    });
+  }, []);
 
   const view = useMemo(() => {
     if (!raw) return null;
@@ -61,19 +73,32 @@ export function HomePage() {
   async function runDetect(samples: Float32Array, sampleRate: number) {
     setBusy(true);
     setError(null);
-    setProgress(20);
-    setStatus('正在分析和弦（瀏覽器內處理）…');
+    setProgress(5);
+    setStatus(
+      separate
+        ? '音源分離（HTDemucs，音訊不離開此裝置）…'
+        : '正在分析和弦（瀏覽器內處理）…',
+    );
     try {
-      const result = await detectInWorker(samples, sampleRate, {
-        simplifyLevel: simplify,
-        suppressDrone: true,
+      const result = await analyzeAudio(samples, sampleRate, {
+        separate,
+        preferWebGpu: webgpu,
+        detect: {
+          simplifyLevel: simplify,
+          suppressDrone: !separate,
+        },
+        onProgress: (p, detail) => {
+          setProgress(Math.round(p * 100));
+          if (detail) setStatus(detail);
+        },
       });
       setProgress(100);
       setRaw(result);
       setTranspose(0);
       setSelected(0);
       setStatus(
-        `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊。`,
+        `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
+          (result.usedSeparation ? '（已做人聲／鼓分離）' : '。'),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -234,6 +259,30 @@ export function HomePage() {
               />
             </label>
           </div>
+          <label
+            style={{
+              display: 'flex',
+              gap: '0.5rem',
+              alignItems: 'flex-start',
+              marginTop: '1rem',
+              maxWidth: '36rem',
+              fontSize: '0.92rem',
+              color: 'var(--ink-soft)',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={separate}
+              disabled={busy}
+              onChange={(e) => setSeparate(e.target.checked)}
+              style={{ marginTop: '0.2rem' }}
+            />
+            <span>
+              <strong style={{ color: 'var(--ink)' }}>音源分離（HTDemucs）</strong>
+              — 先去掉人聲／鼓再辨識和弦，並用貝斯軌強化根音。首次需下載約 172MB
+              模型（可改託管於 R2）。{sepHint}
+            </span>
+          </label>
         </div>
         <div className="hero-visual" aria-hidden>
           <div className="wave" />

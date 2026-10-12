@@ -37,6 +37,21 @@ export function detectChords(
     };
   }
 
+  // Optional bass stem → replace per-frame bass chroma
+  if (options.bassSamples && options.bassSamples.length > 0) {
+    const bassFrames = computeChromaFrames(
+      options.bassSamples,
+      sampleRate,
+      frameSize,
+      hopSize,
+      tuningCents,
+    );
+    const n = Math.min(frames.length, bassFrames.length);
+    for (let i = 0; i < n; i++) {
+      frames[i]!.bassChroma = bassFrames[i]!.chroma;
+    }
+  }
+
   // Running-mean drone suppression (helps capo songs with ringing open strings)
   if (suppressDrone && frames.length > 8) {
     const mean = new Float32Array(12);

@@ -1,19 +1,37 @@
-import type { DetectionResult, DetectOptions } from '@chord-ai/engine';
+import {
+  detectChordsFromStems,
+  type DetectionResult,
+  type DetectOptions,
+  type SeparationStems,
+} from '@chord-ai/engine';
 import type { WorkerRequest, WorkerResponse } from '../workers/chordWorker';
+import type { SeparateRequest, SeparateResponse } from '../workers/separateWorker';
 
-let worker: Worker | null = null;
+let chordWorker: Worker | null = null;
+let separateWorker: Worker | null = null;
 let seq = 1;
 
-function getWorker() {
-  if (!worker) {
-    worker = new Worker(new URL('../workers/chordWorker.ts', import.meta.url), {
+function getChordWorker() {
+  if (!chordWorker) {
+    chordWorker = new Worker(new URL('../workers/chordWorker.ts', import.meta.url), {
       type: 'module',
     });
   }
-  return worker;
+  return chordWorker;
 }
 
-export async function decodeFile(file: File): Promise<{ samples: Float32Array; sampleRate: number }> {
+function getSeparateWorker() {
+  if (!separateWorker) {
+    separateWorker = new Worker(new URL('../workers/separateWorker.ts', import.meta.url), {
+      type: 'module',
+    });
+  }
+  return separateWorker;
+}
+
+export async function decodeFile(
+  file: File,
+): Promise<{ samples: Float32Array; sampleRate: number }> {
   const ctx = new AudioContext();
   try {
     const buf = await file.arrayBuffer();
@@ -41,7 +59,7 @@ export function detectInWorker(
   sampleRate: number,
   options?: DetectOptions,
 ): Promise<DetectionResult> {
-  const w = getWorker();
+  const w = getChordWorker();
   const id = seq++;
   return new Promise((resolve, reject) => {
     const onMsg = (ev: MessageEvent<WorkerResponse>) => {
@@ -54,6 +72,91 @@ export function detectInWorker(
     const msg: WorkerRequest = { id, samples, sampleRate, options };
     w.postMessage(msg);
   });
+}
+
+export function separateInWorker(
+  samples: Float32Array,
+  sampleRate: number,
+  options: {
+    preferWebGpu?: boolean;
+    modelUrl?: string;
+    onProgress?: (progress: number, detail: string) => void;
+  } = {},
+): Promise<SeparationStems> {
+  const w = getSeparateWorker();
+  const id = seq++;
+  return new Promise((resolve, reject) => {
+    const onMsg = (ev: MessageEvent<SeparateResponse>) => {
+      const data = ev.data;
+      if (data.id !== id) return;
+      if ('type' in data && data.type === 'progress') {
+        options.onProgress?.(data.progress, data.detail);
+        return;
+      }
+      w.removeEventListener('message', onMsg);
+      if ('ok' in data && data.ok === false) {
+        reject(new Error(data.error));
+        return;
+      }
+      if (!('ok' in data) || !data.ok) {
+        reject(new Error('Unexpected worker response'));
+        return;
+      }
+      const stems = data.stems;
+      resolve({
+        drums: { left: stems.drumsL, right: stems.drumsR },
+        bass: { left: stems.bassL, right: stems.bassR },
+        other: { left: stems.otherL, right: stems.otherR },
+        vocals: { left: stems.vocalsL, right: stems.vocalsR },
+        sampleRate: stems.sampleRate,
+      });
+    };
+    w.addEventListener('message', onMsg);
+    const msg: SeparateRequest = {
+      id,
+      samples,
+      sampleRate,
+      preferWebGpu: options.preferWebGpu,
+      modelUrl: options.modelUrl,
+    };
+    w.postMessage(msg);
+  });
+}
+
+/** Separate (optional) then detect — all in workers / local. */
+export async function analyzeAudio(
+  samples: Float32Array,
+  sampleRate: number,
+  options: {
+    separate: boolean;
+    preferWebGpu?: boolean;
+    detect?: DetectOptions;
+    onProgress?: (progress: number, detail: string) => void;
+  },
+): Promise<DetectionResult & { usedSeparation: boolean }> {
+  if (!options.separate) {
+    options.onProgress?.(0.2, '和弦辨識中…');
+    const result = await detectInWorker(samples, sampleRate, options.detect);
+    options.onProgress?.(1, '完成');
+    return { ...result, usedSeparation: false };
+  }
+
+  try {
+    const stems = await separateInWorker(samples, sampleRate, {
+      preferWebGpu: options.preferWebGpu,
+      onProgress: options.onProgress,
+    });
+    options.onProgress?.(0.95, '以人聲／鼓分離後的伴奏辨識和弦…');
+    // Run stem detection on main thread via engine (fast vs Demucs); could also post to chord worker
+    const result = detectChordsFromStems(stems, options.detect);
+    options.onProgress?.(1, '完成（已啟用 HTDemucs 分離）');
+    return { ...result, usedSeparation: true };
+  } catch (e) {
+    console.warn('Separation failed, falling back to full mix', e);
+    options.onProgress?.(0.5, '分離失敗，改用完整混音…');
+    const result = await detectInWorker(samples, sampleRate, options.detect);
+    return { ...result, usedSeparation: false };
+  }
 }
 
 /** Record from microphone until stop() is called. */
