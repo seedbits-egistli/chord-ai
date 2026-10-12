@@ -9,7 +9,7 @@
 3. **Real audio (local only)**: `hey_jude.mp3` / `wonderwall.mp3` via `CHORD_AI_TEST_AUDIO` + ffmpeg. **Never committed.**
 4. **Wonderwall** scored in **sounding key** (capo 2 → F#m7–A–Esus4–B7sus4).
 5. **快速模式**: full-mix chroma templates (no ML download).
-6. **精準模式** (UI opt-in): UMX-HQ → Basic Pitch on `other`/`bass` → **training-free** beat-level metric HMM (Mauch & Dixon 2010 simplified): harmonic-novelty downbeat + per-beat PC emissions + metric-position transitions + key/out-of-key prior. No staff generation. See [`docs/models.md`](./models.md).
+6. **精準模式** (UI opt-in): UMX-HQ → Basic Pitch + **NNLS chroma** (Mauch & Dixon ISMIR 2010, independent MIT) fused into beat-level metric HMM; harmonic downbeat; drone/sus-aware scoring; vocal residual control. See [`docs/models.md`](./models.md).
 7. Beat-level metrics with lag / loop-phase search. **Headline metric is tone overlap** (shared pitch classes), not chord-name equality:
    - **Tone overlap %** (primary): mean of `0.55·Jaccard + 0.35·recall + 0.10·rootMatch` per beat, where Jaccard = `|A∩B|/|A∪B|` and recall = `|A∩B|/|A|` over reference/hypothesis pitch-class sets.
    - **Jaccard / Recall / Root**: component columns (root match reported separately).
@@ -67,9 +67,9 @@ Compared on the **first 60s** vs Ultimate Guitar–style references. **Tone % is
 | Song | Fast tone % | Precise tone % | Δ tone | Fast J / R / root | Precise J / R / root | Fast exact / majmin | Precise exact / majmin | Key (precise) |
 |---|---:|---:|---:|---|---|---|---|---|
 | Hey Jude | 48.6 | **94.3** | +45.7 | 47.8 / 56.8 / 24.3 | 94.1 / 95.1 / 92.6 | 24.3 / 24.3 | 92.6 / 92.6 | F |
-| Wonderwall | 39.5 | **49.7** | +10.2 | 38.3 / 44.1 / 30.3 | 48.2 / 55.6 / 37.5 | 22.4 / 30.3 | 31.3 / 31.3 | A |
+| Wonderwall | 39.5 | **56.2** | +16.7 | 38.3 / 44.1 / 30.3 | 56.7 / 62.6 / 31.1 | 22.4 / 30.3 | 31.1 / 31.1 | E |
 
-Average precise **tone overlap**: **72.0%** (J=71.2, R=75.3, root=65.0; exact 61.9 / majmin 61.9).
+Average precise **tone overlap**: **75.3%** (J=75.4, R=78.8, root=61.8; exact 61.8 / majmin 61.8).
 
 ### Before / after (tuning + weak-bass)
 
@@ -86,22 +86,22 @@ Fast-mode first-60s drops after the tuning fix are expected (chroma was previous
 | Wonderwall | UMX-HQ chroma | — | 57.2 | — |
 | Wonderwall | Precise | 42.8 | **42.1** | -0.7 |
 
-### Before / after (metric HMM + harmonic downbeat)
+### Before / after (NNLS chroma + metric HMM)
 
-Training-free precise decode (Mauch & Dixon 2010 simplified): harmonic-novelty downbeat phase (+ local re-phase ~8 bars), beat-level PC-histogram emissions with bass/lowest-note root evidence, metric-position Viterbi (change preferred on beat 1, some on beat 3, rare on 2/4), key prior + out-of-key tone penalty, self-transition bias. Hand-set parameters only — no labeled training. Detailed Wonderwall per-bar / histogram dump: [`docs/precise-metric-report.md`](./precise-metric-report.md).
+Training-free precise decode (Mauch & Dixon ISMIR 2010, independent MIT impl. — not GPL Chordino): NNLS approximate-note-transcription chroma (log-freq 3 bins/semitone, spectral std, harmonic dictionary) fused with Basic Pitch histograms; harmonic-novelty downbeat; metric Viterbi; drone/novelty-aware sus scoring; soft vocal residual subtract. Detailed dump: [`docs/precise-metric-report.md`](./precise-metric-report.md).
 
-| Song | Before tone % (1f18a77) | After tone % | Δ | Key | Downbeat phase |
-|---|---:|---:|---:|---|---:|
-| Hey Jude | 86.4 | **94.3** | +7.9 | F | 0 |
-| Wonderwall | 42.1 | **49.7** | +7.6 | A | 3 |
+| Song | Before tone % | After tone % | Δ | Key | Downbeat phase | NNLS ms |
+|---|---:|---:|---:|---|---:|---:|
+| Hey Jude | 94.3 | **94.3** | +0.0 | F | 0 | 0 |
+| Wonderwall | 49.7 | **56.2** | +6.5 | E | 1 | 676 |
 
 ### Wonderwall per-section (first 60s, tone %)
 
 | Section | Fast tone % | Precise tone % | Fast J / R / root | Precise J / R / root |
 |---|---:|---:|---|---|
-| intro(0–16s) | 0.0 | **37.5** | 0 / 0 / 0 | 37.1 / 43.8 / 17.4 |
-| verse(16–45s) | 49.1 | **45.1** | 47.3 / 55.2 / 38.1 | 44.2 / 53.4 / 21.4 |
-| late(45–60s) | 33.2 | **40.5** | 31.9 / 40.9 / 13.6 | 40.7 / 49.2 / 9.1 |
+| intro(0–16s) | 0.0 | **16.8** | 0 / 0 / 0 | 15.9 / 22.8 / 0 |
+| verse(16–45s) | 49.1 | **52.2** | 47.3 / 55.2 / 38.1 | 52.4 / 61.5 / 19 |
+| late(45–60s) | 33.2 | **63.1** | 31.9 / 40.9 / 13.6 | 63.4 / 71.6 / 31.8 |
 
 ## Limitations
 
@@ -112,4 +112,4 @@ Training-free precise decode (Mauch & Dixon 2010 simplified): harmonic-novelty d
 - Staff notation UI is unchanged (still chord-timeline ABC); precise mode does not generate staff from notes.
 - **No commercial recordings are in git.**
 
-*Generated 2026-10-12T15:10:20.634Z by `npm run validate:real -w @chord-ai/engine`.*
+*Generated 2026-10-12T16:55:11.579Z by `npm run validate:real -w @chord-ai/engine`.*
