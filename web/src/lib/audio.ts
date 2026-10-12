@@ -38,6 +38,18 @@ function getChordWorker() {
   return g.__chordAiChordWorker;
 }
 
+/** Drop a broken separation worker so the next call spawns a fresh one. */
+export function resetSeparateWorker(): void {
+  const w = g.__chordAiSeparateWorker;
+  if (!w) return;
+  g.__chordAiSeparateWorker = undefined;
+  try {
+    w.terminate();
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Single long-lived separation worker (survives HMR via globalThis). */
 export function getSeparateWorker() {
   if (!g.__chordAiSeparateWorker) {
@@ -51,6 +63,8 @@ export function getSeparateWorker() {
   }
   return g.__chordAiSeparateWorker;
 }
+
+const SEPARATE_TIMEOUT_MS = 300_000;
 
 export async function decodeFile(
   file: File,
@@ -111,12 +125,46 @@ export function separateInWorker(
     vocalsUrl?: string;
     bassUrl?: string;
     useBass?: boolean;
+    timeoutMs?: number;
     onProgress?: (progress: number, detail: string, fromCache?: boolean) => void;
   } = {},
 ): Promise<SeparationStems & { sources: SeparateSources }> {
   const w = getSeparateWorker();
   const id = nextId();
+  const timeoutMs = options.timeoutMs ?? SEPARATE_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const onError = (ev: ErrorEvent) => {
+      finish(() => {
+        resetSeparateWorker();
+        reject(new Error(ev.message || 'Separation worker crashed'));
+      });
+    };
+    const onMessageError = () => {
+      finish(() => {
+        resetSeparateWorker();
+        reject(new Error('Separation worker messageerror'));
+      });
+    };
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      w.removeEventListener('message', onMsg);
+      w.removeEventListener('error', onError);
+      w.removeEventListener('messageerror', onMessageError);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        resetSeparateWorker();
+        reject(
+          new Error(
+            `Separation timed out after ${Math.round(timeoutMs / 1000)}s (last step may be ORT/ONNX init)`,
+          ),
+        );
+      });
+    }, timeoutMs);
     const onMsg = (ev: MessageEvent<SeparateResponse>) => {
       const data = ev.data;
       if (data.id !== id) return;
@@ -124,26 +172,29 @@ export function separateInWorker(
         options.onProgress?.(data.progress, data.detail, data.fromCache);
         return;
       }
-      w.removeEventListener('message', onMsg);
       if ('ok' in data && data.ok === false) {
-        reject(new Error(data.error));
+        finish(() => reject(new Error(data.error)));
         return;
       }
       if (!('ok' in data) || !data.ok) {
-        reject(new Error('Unexpected worker response'));
+        finish(() => reject(new Error('Unexpected worker response')));
         return;
       }
       const stems = data.stems;
-      resolve({
-        drums: { left: stems.drumsL, right: stems.drumsR },
-        bass: { left: stems.bassL, right: stems.bassR },
-        other: { left: stems.otherL, right: stems.otherR },
-        vocals: { left: stems.vocalsL, right: stems.vocalsR },
-        sampleRate: stems.sampleRate,
-        sources: data.sources,
-      });
+      finish(() =>
+        resolve({
+          drums: { left: stems.drumsL, right: stems.drumsR },
+          bass: { left: stems.bassL, right: stems.bassR },
+          other: { left: stems.otherL, right: stems.otherR },
+          vocals: { left: stems.vocalsL, right: stems.vocalsR },
+          sampleRate: stems.sampleRate,
+          sources: data.sources,
+        }),
+      );
     };
     w.addEventListener('message', onMsg);
+    w.addEventListener('error', onError);
+    w.addEventListener('messageerror', onMessageError);
     const msg: SeparateRequest = {
       type: 'separate',
       id,
@@ -265,7 +316,14 @@ export async function analyzeAudio(
     detect?: DetectOptions;
     onProgress?: (progress: number, detail: string, fromCache?: boolean) => void;
   },
-): Promise<DetectionResult & { usedSeparation: boolean; separateSources?: SeparateSources }> {
+): Promise<
+  DetectionResult & {
+    usedSeparation: boolean;
+    separateSources?: SeparateSources;
+    /** Set when separation failed and we fell back to full-mix detection. */
+    separationError?: string;
+  }
+> {
   if (!options.separate) {
     options.onProgress?.(0.2, '和弦辨識中…');
     const result = await detectInWorker(samples, sampleRate, options.detect);
@@ -278,15 +336,23 @@ export async function analyzeAudio(
       preferWebGpu: options.preferWebGpu,
       onProgress: options.onProgress,
     });
-    options.onProgress?.(0.95, '以人聲分離後的伴奏辨識和弦…');
+    options.onProgress?.(0.97, '以人聲分離後的伴奏辨識和弦…');
     const result = detectChordsFromStems(stems, options.detect);
     options.onProgress?.(1, `完成（UMX-HQ；${formatSources(stems.sources)}）`);
     return { ...result, usedSeparation: true, separateSources: stems.sources };
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     console.warn('Separation failed, falling back to full mix', e);
-    options.onProgress?.(0.5, '分離失敗，改用完整混音…');
-    const result = await detectInWorker(samples, sampleRate, options.detect);
-    return { ...result, usedSeparation: false };
+    options.onProgress?.(0.55, `分離失敗：${msg} — 改用完整混音…`);
+    try {
+      const result = await detectInWorker(samples, sampleRate, options.detect);
+      options.onProgress?.(1, `完成（完整混音；分離失敗：${msg}）`);
+      return { ...result, usedSeparation: false, separationError: msg };
+    } catch (detectErr) {
+      options.onProgress?.(1, '分析失敗');
+      const d = detectErr instanceof Error ? detectErr.message : String(detectErr);
+      throw new Error(`分離失敗（${msg}）；完整混音辨識也失敗（${d}）`);
+    }
   }
 }
 

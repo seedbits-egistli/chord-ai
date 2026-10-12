@@ -123,6 +123,24 @@ let ortInitPromise: Promise<void> | null = null;
 // Cache ONNX fetches only — never ORT .mjs/.wasm (breaks blob: dynamic import).
 installFetchCacheInterceptor((url) => isOnnxModelUrl(url));
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function configureOrt(): Promise<void> {
   if (ortConfigured) return;
   if (ortInitPromise) return ortInitPromise;
@@ -134,20 +152,52 @@ async function configureOrt(): Promise<void> {
     // Keep single-threaded same-origin import of /ort/*.mjs.
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.proxy = false;
-    // Probe that same-origin runtime is reachable before InferenceSession.create
+    // Probe that same-origin runtime is real JS — Vite SPA can 200 index.html for /ort/*
     const mjsUrl = `${base}ort-wasm-simd-threaded.mjs`;
+    const wasmUrl = `${base}ort-wasm-simd-threaded.wasm`;
     const probe = await fetch(mjsUrl, { method: 'GET' });
     if (!probe.ok) {
       throw new Error(
-        `ORT runtime missing at ${mjsUrl} (${probe.status}). Run: npm run sync:ort`,
+        `ORT runtime missing at ${mjsUrl} (${probe.status}). Restart Vite or run: npm run sync:ort`,
       );
+    }
+    const ct = (probe.headers.get('content-type') || '').toLowerCase();
+    const head = (await probe.text()).trimStart().slice(0, 80);
+    if (
+      ct.includes('text/html') ||
+      head.startsWith('<!DOCTYPE') ||
+      head.startsWith('<!doctype') ||
+      head.startsWith('<html') ||
+      head.startsWith('<HTML')
+    ) {
+      throw new Error(
+        `ORT runtime at ${mjsUrl} returned HTML (SPA fallback), not the wasm loader. ` +
+          'Restart the Vite dev server so ensureOrtRuntime can copy files from node_modules.',
+      );
+    }
+    const wasmProbe = await fetch(wasmUrl, { method: 'HEAD' });
+    if (!wasmProbe.ok) {
+      // Some hosts lack HEAD — try GET range-less status via GET abort
+      const wasmGet = await fetch(wasmUrl, { method: 'GET' });
+      if (!wasmGet.ok) {
+        throw new Error(
+          `ORT wasm missing at ${wasmUrl} (${wasmGet.status}). Restart Vite or run: npm run sync:ort`,
+        );
+      }
+      // Drain/cancel body to avoid holding 14MiB
+      try {
+        await wasmGet.body?.cancel();
+      } catch {
+        /* ignore */
+      }
     }
     ortConfigured = true;
   })();
   try {
-    await ortInitPromise;
+    await withTimeout(ortInitPromise, 30_000, 'ORT runtime init');
   } catch (e) {
     ortInitPromise = null;
+    ortConfigured = false;
     throw e;
   }
 }
@@ -273,12 +323,20 @@ async function getOrCreateSession(
   const key = `${url}|wasm`;
   const hit = sessions.get(key);
   if (hit) return hit;
-  const session = await ort.InferenceSession.create(buf.slice(0), {
-    executionProviders: ['wasm'],
-    graphOptimizationLevel: 'basic',
-    enableCpuMemArena: false,
-    enableMemPattern: false,
-  });
+  if (!buf || buf.byteLength < 1024) {
+    throw new Error(`ONNX buffer too small for ${url} (${buf?.byteLength ?? 0} bytes)`);
+  }
+  const label = url.split('/').pop() || 'model.onnx';
+  const session = await withTimeout(
+    ort.InferenceSession.create(buf.slice(0), {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'basic',
+      enableCpuMemArena: false,
+      enableMemPattern: false,
+    }),
+    90_000,
+    `ONNX session create (${label})`,
+  );
   sessions.set(key, session as unknown as OrtSession);
   return session as unknown as OrtSession;
 }
@@ -346,31 +404,47 @@ async function handleSeparate(msg: SeparateRequest) {
       bassSource = b.source;
     }
 
-    post({ id, type: 'progress', progress: 0.42, detail: '建立 ONNX session…' });
+    post({ id, type: 'progress', progress: 0.42, detail: '建立 ONNX session（vocals）…' });
     const vocalsSession = await getOrCreateSession(vocalsUrl, v.buf);
-    const bassSession = bassBuf ? await getOrCreateSession(bassUrl, bassBuf) : null;
+    let bassSession: OrtSession | null = null;
+    if (bassBuf) {
+      post({ id, type: 'progress', progress: 0.44, detail: '建立 ONNX session（bass）…' });
+      bassSession = await getOrCreateSession(bassUrl, bassBuf);
+    }
 
-    const stems = await separateWithUmx(samples, sampleRate, {
-      ort: ort as unknown as import('@chord-ai/engine').OrtLike,
-      vocalsSession,
-      bassSession,
-      sessionOptions: {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'basic',
-        enableCpuMemArena: false,
-        enableMemPattern: false,
-      },
-      onProgress: (p) => {
-        post({
-          id,
-          type: 'progress',
-          progress: 0.45 + p.progress * 0.5,
-          detail: p.detail || p.phase,
-          fromCache: v.source !== 'network' && bassSource !== 'network',
-        });
-      },
+    post({ id, type: 'progress', progress: 0.46, detail: '執行 UMX 分離…' });
+    const stems = await withTimeout(
+      separateWithUmx(samples, sampleRate, {
+        ort: ort as unknown as import('@chord-ai/engine').OrtLike,
+        vocalsSession,
+        bassSession,
+        sessionOptions: {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'basic',
+          enableCpuMemArena: false,
+          enableMemPattern: false,
+        },
+        onProgress: (p) => {
+          post({
+            id,
+            type: 'progress',
+            progress: 0.46 + p.progress * 0.5,
+            detail: p.detail || p.phase,
+            fromCache: v.source !== 'network' && bassSource !== 'network',
+          });
+        },
+      }),
+      240_000,
+      'UMX separation',
+    );
+
+    post({
+      id,
+      type: 'progress',
+      progress: 0.98,
+      detail: '分離完成',
+      fromCache: v.source !== 'network' && bassSource !== 'network',
     });
-
     post({
       id,
       ok: true,

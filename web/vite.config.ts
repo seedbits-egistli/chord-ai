@@ -1,7 +1,15 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
-import { writeFileSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs';
+import {
+  writeFileSync,
+  readdirSync,
+  unlinkSync,
+  statSync,
+  existsSync,
+  createReadStream,
+} from 'node:fs';
+import { syncOrtRuntime } from '../scripts/sync-ort-runtime.mjs';
 
 /**
  * Drop ORT wasm that Vite may emit into hashed /assets/ (from onnxruntime-web
@@ -44,13 +52,90 @@ function stripWasmDir(dir: string) {
   }
 }
 
+/**
+ * Always materialize /ort/ from node_modules and never SPA-fallback those URLs
+ * to index.html (that made ORT "succeed" the fetch probe then hang on import).
+ * Covers `npm run dev -w @chord-ai/web` which skips root `predev`.
+ */
+function ensureOrtRuntime(): Plugin {
+  const publicOrt = path.resolve(__dirname, 'public/ort');
+  const nmOrt = path.resolve(__dirname, '../node_modules/onnxruntime-web/dist');
+
+  const sync = () => {
+    try {
+      const r = syncOrtRuntime({ quiet: false });
+      if (r.copied.length) {
+        console.log(`[ensure-ort-runtime] synced ${r.copied.join(', ')}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[ensure-ort-runtime] ${msg}`);
+      throw e;
+    }
+  };
+
+  return {
+    name: 'ensure-ort-runtime',
+    buildStart() {
+      sync();
+    },
+    configureServer(server) {
+      sync();
+      // Register before Vite internals so missing /ort/* never becomes index.html
+      server.middlewares.use((req, res, next) => {
+        const raw = req.url?.split('?')[0] ?? '';
+        if (!raw.startsWith('/ort/')) {
+          next();
+          return;
+        }
+        const name = decodeURIComponent(raw.slice('/ort/'.length));
+        if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) {
+          res.statusCode = 404;
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.end('ORT runtime path not found');
+          return;
+        }
+        const candidates = [path.join(publicOrt, name), path.join(nmOrt, name)];
+        for (const file of candidates) {
+          if (!existsSync(file) || !statSync(file).isFile()) continue;
+          const ext = path.extname(file).toLowerCase();
+          const type =
+            ext === '.wasm'
+              ? 'application/wasm'
+              : ext === '.mjs' || ext === '.js'
+                ? 'text/javascript; charset=utf-8'
+                : 'application/octet-stream';
+          const size = statSync(file).size;
+          res.statusCode = 200;
+          res.setHeader('Content-Type', type);
+          res.setHeader('Content-Length', String(size));
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+          if (req.method === 'HEAD') {
+            res.end();
+            return;
+          }
+          createReadStream(file).pipe(res);
+          return;
+        }
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end(
+          `ORT runtime missing: ${name}. ` +
+            'Install onnxruntime-web and restart Vite (ensureOrtRuntime copies into web/public/ort).',
+        );
+      });
+    },
+  };
+}
+
 const ortWasmExtern = path.resolve(
   __dirname,
   '../node_modules/onnxruntime-web/dist/ort.wasm.min.mjs',
 );
 
 export default defineConfig({
-  plugins: [react(), stripBundledOrtWasm()],
+  plugins: [react(), ensureOrtRuntime(), stripBundledOrtWasm()],
   resolve: {
     // Prefer extern-wasm build so ort.env.wasm.wasmPaths (/ort/) is used —
     // not the default bundle that resolves .wasm via import.meta.url.

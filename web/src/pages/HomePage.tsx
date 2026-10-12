@@ -235,11 +235,19 @@ export function HomePage() {
           : result.separateSources
             ? '；模型已寫入本機快取'
             : '';
-      setStatus(
-        `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
-          (result.usedSeparation ? `（已做人聲分離${srcNote}）` : '。'),
-      );
+      if (result.separationError) {
+        setError(`音源分離失敗，已改用完整混音：${result.separationError}`);
+        setStatus(
+          `完成（完整混音）：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊`,
+        );
+      } else {
+        setStatus(
+          `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
+            (result.usedSeparation ? `（已做人聲分離${srcNote}）` : '。'),
+        );
+      }
     } catch (e) {
+      setProgress(100);
       setError(e instanceof Error ? e.message : String(e));
       setStatus('分析失敗');
     } finally {
