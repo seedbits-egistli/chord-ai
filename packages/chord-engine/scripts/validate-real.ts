@@ -40,6 +40,18 @@ const BEFORE_TONE = {
   Wonderwall: { fast: 42.5, precise: 42.8 },
 } as const;
 
+/** Frozen post-tuning precise tone % (commit 1f18a77) — baseline for metric/downbeat work. */
+const BEFORE_METRIC_TONE = {
+  'Hey Jude': 86.4,
+  Wonderwall: 42.1,
+} as const;
+
+/** Frozen post-tuning fast / UMX / precise (1f18a77) for historical tuning table. */
+const AFTER_TUNING_TONE = {
+  'Hey Jude': { fast: 48.6, umx: 92.6, precise: 86.4 },
+  Wonderwall: { fast: 37.7, umx: 57.2, precise: 42.1 },
+} as const;
+
 interface SectionTone {
   name: string;
   tonePct: number;
@@ -66,6 +78,8 @@ interface Row {
   offsetMs: number;
   note: string;
   sections?: SectionTone[];
+  /** Precise-mode estimated downbeat phase (i%4===phase → downbeat). */
+  downbeatPhase?: number;
 }
 
 function chordAt(events: ChordEvent[], tMs: number): string {
@@ -355,7 +369,7 @@ async function main() {
                 {
                   simplifyLevel: ref.id.includes('wonderwall') ? 0.35 : 0.45,
                   bpmHint: ref.bpm,
-                  halfBar: true,
+                  metricDecode: true,
                 },
               );
               const precAligned = phaseAlignedSegments(ref, (segs) => {
@@ -396,12 +410,13 @@ async function main() {
                 ...toneFields(precScore),
                 detectedKey: preciseResult.key,
                 refKey: ref.key,
-                note: `精準模式 UMX+Basic Pitch on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}`,
+                note: `精準模式 UMX+Basic Pitch metric-HMM on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}; downbeatPhase=${preciseResult.downbeatPhase}`,
                 sections,
+                downbeatPhase: preciseResult.downbeatPhase,
               };
               rows.push(precRow);
               console.log(
-                `${ref.title} +precise (first ${sepMaxSec}s): tone ${precRow.toneOverlapPct}% (J=${precRow.toneJaccardPct} R=${precRow.toneRecallPct} root=${precRow.rootMatchPct}) exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key}`,
+                `${ref.title} +precise (first ${sepMaxSec}s): tone ${precRow.toneOverlapPct}% (J=${precRow.toneJaccardPct} R=${precRow.toneRecallPct} root=${precRow.rootMatchPct}) exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key} downbeatPhase=${preciseResult.downbeatPhase}`,
               );
               if (sections?.length) {
                 console.log(
@@ -485,7 +500,7 @@ function writeDocs(rows: Row[]) {
     '3. **Real audio (local only)**: `hey_jude.mp3` / `wonderwall.mp3` via `CHORD_AI_TEST_AUDIO` + ffmpeg. **Never committed.**',
     '4. **Wonderwall** scored in **sounding key** (capo 2 → F#m7–A–Esus4–B7sus4).',
     '5. **快速模式**: full-mix chroma templates (no ML download).',
-    '6. **精準模式** (UI opt-in): UMX-HQ separation → Basic Pitch (Apache-2.0, ~226 KiB ONNX) on `other`/`bass` → note-based chords (duration×velocity PC histogram, bass root/slash, drone suppress, key-aware Viterbi). No staff generation. See [`docs/models.md`](./models.md).',
+    '6. **精準模式** (UI opt-in): UMX-HQ → Basic Pitch on `other`/`bass` → **training-free** beat-level metric HMM (Mauch & Dixon 2010 simplified): harmonic-novelty downbeat + per-beat PC emissions + metric-position transitions + key/out-of-key prior. No staff generation. See [`docs/models.md`](./models.md).',
     '7. Beat-level metrics with lag / loop-phase search. **Headline metric is tone overlap** (shared pitch classes), not chord-name equality:',
     '   - **Tone overlap %** (primary): mean of `0.55·Jaccard + 0.35·recall + 0.10·rootMatch` per beat, where Jaccard = `|A∩B|/|A∪B|` and recall = `|A∩B|/|A|` over reference/hypothesis pitch-class sets.',
     '   - **Jaccard / Recall / Root**: component columns (root match reported separately).',
@@ -634,7 +649,7 @@ function writeDocs(rows: Row[]) {
       '',
     );
 
-    // Before/after table (tuning + weak-bass fixes)
+    // Historical tuning + weak-bass before/after (frozen at 1f18a77)
     lines.push('### Before / after (tuning + weak-bass)');
     lines.push('');
     lines.push(
@@ -642,36 +657,41 @@ function writeDocs(rows: Row[]) {
     );
     lines.push('');
     lines.push(
-      'Fast-mode first-60s drops after the tuning fix are expected (chroma was previously warped); **precise Hey Jude must not regress** (headline path).',
+      'Fast-mode first-60s drops after the tuning fix are expected (chroma was previously warped); **precise Hey Jude must not regress** (headline path). Numbers frozen at commit `1f18a77`.',
     );
     lines.push('');
     lines.push('| Song | Mode | Before tone % | After tone % | Δ |');
     lines.push('|---|---|---:|---:|---:|');
+    for (const title of Object.keys(BEFORE_TONE) as (keyof typeof BEFORE_TONE)[]) {
+      const before = BEFORE_TONE[title];
+      const after = AFTER_TUNING_TONE[title];
+      lines.push(
+        `| ${title} | Fast (first ${sepMaxSec}s) | ${before.fast.toFixed(1)} | ${after.fast.toFixed(1)} | ${after.fast - before.fast >= 0 ? '+' : ''}${(after.fast - before.fast).toFixed(1)} |`,
+      );
+      lines.push(`| ${title} | UMX-HQ chroma | — | ${after.umx.toFixed(1)} | — |`);
+      lines.push(
+        `| ${title} | Precise | ${before.precise.toFixed(1)} | **${after.precise.toFixed(1)}** | ${after.precise - before.precise >= 0 ? '+' : ''}${(after.precise - before.precise).toFixed(1)} |`,
+      );
+    }
+    lines.push('');
+
+    // Metric HMM / downbeat before/after (live precise vs 1f18a77)
+    lines.push('### Before / after (metric HMM + harmonic downbeat)');
+    lines.push('');
+    lines.push(
+      'Training-free precise decode (Mauch & Dixon 2010 simplified): harmonic-novelty downbeat phase (+ local re-phase ~8 bars), beat-level PC-histogram emissions with bass/lowest-note root evidence, metric-position Viterbi (change preferred on beat 1, some on beat 3, rare on 2/4), key prior + out-of-key tone penalty, self-transition bias. Hand-set parameters only — no labeled training. Detailed Wonderwall per-bar / histogram dump: [`docs/precise-metric-report.md`](./precise-metric-report.md).',
+    );
+    lines.push('');
+    lines.push('| Song | Before tone % (1f18a77) | After tone % | Δ | Key | Downbeat phase |');
+    lines.push('|---|---:|---:|---:|---|---:|');
     for (const r of precise) {
-      const baseTitle = r.title.replace(' (+precise)', '') as keyof typeof BEFORE_TONE;
-      const before = BEFORE_TONE[baseTitle];
-      const base = real.find((x) => x.title === baseTitle);
-      const sepRow = sep.find((x) => x.title === `${baseTitle} (+UMX-HQ)`);
-      let fastTone = NaN;
-      const m = base?.note.match(/first\d+s tone ([\d.]+)%/);
-      if (m) fastTone = Number(m[1]);
-      if (before) {
-        const dFast = Number.isFinite(fastTone)
-          ? `${fastTone - before.fast >= 0 ? '+' : ''}${(fastTone - before.fast).toFixed(1)}`
-          : '—';
-        const dPrec = `${r.toneOverlapPct - before.precise >= 0 ? '+' : ''}${(r.toneOverlapPct - before.precise).toFixed(1)}`;
-        lines.push(
-          `| ${baseTitle} | Fast (first ${sepMaxSec}s) | ${before.fast.toFixed(1)} | ${fmt(fastTone)} | ${dFast} |`,
-        );
-        if (sepRow && Number.isFinite(sepRow.toneOverlapPct)) {
-          lines.push(
-            `| ${baseTitle} | UMX-HQ chroma | — | ${fmt(sepRow.toneOverlapPct)} | — |`,
-          );
-        }
-        lines.push(
-          `| ${baseTitle} | Precise | ${before.precise.toFixed(1)} | **${fmt(r.toneOverlapPct)}** | ${dPrec} |`,
-        );
-      }
+      const baseTitle = r.title.replace(' (+precise)', '') as keyof typeof BEFORE_METRIC_TONE;
+      const before = BEFORE_METRIC_TONE[baseTitle];
+      if (before === undefined) continue;
+      const d = `${r.toneOverlapPct - before >= 0 ? '+' : ''}${(r.toneOverlapPct - before).toFixed(1)}`;
+      lines.push(
+        `| ${baseTitle} | ${before.toFixed(1)} | **${fmt(r.toneOverlapPct)}** | ${d} | ${r.detectedKey} | ${r.downbeatPhase ?? '—'} |`,
+      );
     }
     lines.push('');
 

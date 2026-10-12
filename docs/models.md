@@ -35,7 +35,10 @@ The separate / precise workers import `onnxruntime-web/wasm` (non-jsep) and load
 
 1. UMX-HQ → stems  
 2. Basic Pitch → note events on `other` + `bass`  
-3. Per half-bar: duration×velocity pitch-class histogram; lowest bass MIDI → root/slash; suppress persistent drone PCs; key-aware Viterbi; full quality vocabulary + slash chords  
+3. Beat grid → **harmonic-novelty downbeat** (training-free; optional local re-phase ~8 bars)  
+4. Per-beat duration×velocity PC histogram; bass / lowest-note root evidence; drone suppress  
+5. **Metric-position HMM/Viterbi** (Mauch & Dixon 2010 simplified): change preferred on beat 1, some on beat 3, rare on 2/4; key prior + out-of-key tone penalty; self-transition bias; hand-set parameters only  
+6. Merge identical labels; full quality vocabulary + slash chords (no staff from notes)  
 
 ## Accuracy vs size
 

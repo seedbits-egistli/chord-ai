@@ -1,12 +1,13 @@
 /**
  * Note-based chord inference for 精準模式 (precise mode).
  *
- * Inputs: Basic Pitch note events from accompaniment (other) and bass stems.
- * Per beat / half-bar: duration×velocity weighted pitch-class histogram,
- * lowest bass note as root/slash bass, persistent drone PC suppression,
- * key-aware Viterbi smoothing. Emits full quality vocabulary + slash chords.
+ * Training-free pipeline (Mauch & Dixon 2010 simplified):
+ * 1) Beat grid → harmonic-novelty downbeat phase (+ local re-phase)
+ * 2) Per-beat PC histogram emissions (templates + bass/lowest-note)
+ * 3) Metric-position HMM/Viterbi (change preferred on beat 1, rare on 2/4)
+ *    with key prior / out-of-key tone penalty
  *
- * No staff notation — chords only.
+ * No staff notation — chords only. No model training.
  */
 
 import { trackBeats } from './beats.js';
@@ -18,8 +19,17 @@ import {
   rmsEnergy,
 } from './chroma.js';
 import { formatChord, parseChord, simplifyLabel } from './chordParse.js';
+import {
+  buildBeatChromas,
+  estimateDownbeatFromBeatChromas,
+} from './downbeat.js';
 import { detectKey } from './key.js';
-import { topKMatches, viterbiSmooth, type BeatObservation } from './match.js';
+import {
+  topKMatches,
+  viterbiSmoothMetric,
+  type BeatObservation,
+  type MatchContext,
+} from './match.js';
 import { buildInstrumental, type SeparationStems } from './separate.js';
 import type { ChordEvent, ChordLabel, DetectOptions, DetectionResult } from './types.js';
 
@@ -32,8 +42,11 @@ export interface NoteEvent {
 }
 
 export interface PreciseDetectOptions extends DetectOptions {
-  /** Use half-bar windows (2 beats) instead of one beat. Default true. */
-  halfBar?: boolean;
+  /**
+   * If true (default), run beat-level metric HMM then merge identical labels.
+   * If false, fall back to half-bar windows + non-metric Viterbi.
+   */
+  metricDecode?: boolean;
   /** Fraction of windows a PC must appear in to count as hard drone (default 0.7). */
   droneWindowFrac?: number;
   /**
@@ -45,6 +58,10 @@ export interface PreciseDetectOptions extends DetectOptions {
   allowSlash?: boolean;
   /** Bass/other RMS ratio; low values trigger guitar-only root proxy. */
   bassEnergyRatio?: number;
+  /** Re-estimate downbeat every N bars (0 = global only). Default 8. */
+  downbeatChunkBars?: number;
+  /** @deprecated Prefer metricDecode; kept for callers that passed halfBar. */
+  halfBar?: boolean;
 }
 
 function midiToPc(midi: number): number {
@@ -160,9 +177,6 @@ export function lowestSustainedPc(
 
 /**
  * Soft drone profile: mean pitch-class energy across windows.
- * Capo / open-string drones stay high in the mean; subtracting them
- * (rather than hard-zeroing PCs) preserves real chord roots that also
- * appear often (e.g. F and C in Hey Jude).
  */
 export function meanNoteChroma(
   notes: NoteEvent[],
@@ -231,9 +245,7 @@ function applyBassSlash(
     return { root: label.root, quality: label.quality };
   }
   const rel = (bassPc - label.root + 12) % 12;
-  // Root in bass — no slash
   if (rel === 0) return { root: label.root, quality: label.quality };
-  // Common inversions / chord-tone bass only (avoid noisy slashes)
   if (rel === 3 || rel === 4 || rel === 7 || rel === 10) {
     return { root: label.root, quality: label.quality, bass: bassPc };
   }
@@ -249,6 +261,27 @@ function estimateKeyFromNoteHist(notes: NoteEvent[]): string {
   return detectKey(hist);
 }
 
+function beatWindows(
+  beats: number[],
+  bpm: number,
+  durationMs: number,
+): { startMs: number; endMs: number; startSec: number; endSec: number }[] {
+  const beatMs = 60000 / bpm;
+  const windows: { startMs: number; endMs: number; startSec: number; endSec: number }[] = [];
+  for (let i = 0; i < beats.length; i++) {
+    const startMs = beats[i]!;
+    let endMs = i + 1 < beats.length ? beats[i + 1]! : Math.min(durationMs, startMs + beatMs);
+    if (endMs - startMs < 120) endMs = startMs + 120;
+    windows.push({
+      startMs,
+      endMs,
+      startSec: startMs / 1000,
+      endSec: endMs / 1000,
+    });
+  }
+  return windows;
+}
+
 /**
  * Chord detection from transcribed notes + optional stem audio for beat tracking.
  */
@@ -260,7 +293,7 @@ export function detectChordsFromNotes(
   beatAudio?: { samples: Float32Array; sampleRate: number },
 ): DetectionResult {
   const simplifyLevel = options.simplifyLevel ?? 0.45;
-  const halfBar = options.halfBar !== false;
+  const metricDecode = options.metricDecode !== false;
   const droneFrac = options.droneWindowFrac ?? 0.42;
 
   let bpm = options.bpmHint ?? 120;
@@ -273,7 +306,11 @@ export function detectChordsFromNotes(
   if (beatAudio && beatAudio.samples.length > 1024) {
     const frameSize = options.frameSize ?? (beatAudio.sampleRate >= 44100 ? 8192 : 4096);
     const hopSize = options.hopSize ?? Math.floor(frameSize / 4);
-    const tuning = estimateTuningCents(beatAudio.samples, beatAudio.sampleRate, Math.min(8192, frameSize));
+    const tuning = estimateTuningCents(
+      beatAudio.samples,
+      beatAudio.sampleRate,
+      Math.min(8192, frameSize),
+    );
     const frames = computeChromaFrames(
       beatAudio.samples,
       beatAudio.sampleRate,
@@ -296,26 +333,26 @@ export function detectChordsFromNotes(
     for (let t = 0; t < durationMs; t += beatMs) beats.push(t);
   }
 
-  // Build analysis windows: beat or half-bar (2 beats)
-  const windows: { startMs: number; endMs: number; startSec: number; endSec: number }[] = [];
-  const step = halfBar ? 2 : 1;
-  for (let i = 0; i < beats.length; i += step) {
-    const startMs = beats[i]!;
-    const endIdx = Math.min(beats.length - 1, i + step);
-    let endMs = i + step < beats.length ? beats[endIdx]! : startMs + (60000 / bpm) * step;
-    if (endMs - startMs < 200) endMs = startMs + 200;
-    windows.push({
-      startMs,
-      endMs,
-      startSec: startMs / 1000,
-      endSec: endMs / 1000,
-    });
-  }
-
+  const windows = beatWindows(beats, bpm, durationMs);
   const allNotes = accompanimentNotes.concat(bassNotes);
   const droneNotes = accompanimentNotes.length ? accompanimentNotes : allNotes;
+
+  // Per-beat chromas for downbeat (raw, before drone subtract)
+  const beatChromas = buildBeatChromas(windows.length, (i) => {
+    const w = windows[i]!;
+    let ch = noteChroma(accompanimentNotes, w.startSec, w.endSec);
+    let peak = 0;
+    for (let p = 0; p < 12; p++) peak = Math.max(peak, ch[p]!);
+    if (peak < 0.05) ch = noteChroma(allNotes, w.startSec, w.endSec);
+    return ch;
+  });
+
+  const downbeat = estimateDownbeatFromBeatChromas(beatChromas, {
+    beatsPerBar: 4,
+    chunkBars: options.downbeatChunkBars ?? 8,
+  });
+
   const droneMean = meanNoteChroma(droneNotes, windows);
-  // Optional hard mask only for very persistent PCs (capo rings); soft mean always applied
   const hardDrones =
     options.suppressDrone === false
       ? new Set<number>()
@@ -325,11 +362,12 @@ export function detectChordsFromNotes(
 
   const bassEnergyRatio = options.bassEnergyRatio ?? 1;
   const weakBass = bassEnergyRatio < 0.15;
+  const keyConfidence = weakBass ? 0.5 : 0.65;
 
   const observations: BeatObservation[] = [];
-  for (const w of windows) {
+  for (let bi = 0; bi < windows.length; bi++) {
+    const w = windows[bi]!;
     let chroma = noteChroma(accompanimentNotes, w.startSec, w.endSec, hardDrones);
-    // If accompaniment empty, fall back to all notes without hard mask
     let peak = 0;
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     if (peak < 0.05) {
@@ -338,7 +376,6 @@ export function detectChordsFromNotes(
       for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     }
     if (options.suppressDrone !== false) {
-      // Stronger open-string drone discount when bass stem is weak/absent
       subtractDroneMean(chroma, droneMean, weakBass ? 0.62 : 0.55);
     }
     if (audioFrames && audioBlend > 0) {
@@ -357,7 +394,6 @@ export function detectChordsFromNotes(
     if (bass) {
       bassChroma[bass.pc] = 1;
     } else if (proxy) {
-      // Guitar-only windows with no bass-stem notes
       bassChroma[proxy.pc] = 1;
     } else {
       const lows = notesInWindow(accompanimentNotes, w.startSec, w.endSec)
@@ -381,9 +417,12 @@ export function detectChordsFromNotes(
       continue;
     }
 
-    // Keep legacy keyPrior string scoring; aug guard is inside match.ts.
-    // When bass is weak: no slash chords (thumpy false bass).
-    const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, key);
+    const matchCtx: MatchContext = {
+      keyPrior: key,
+      keyConfidence,
+      bassWeight: weakBass ? 0.55 : 1,
+    };
+    const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, matchCtx);
     const candidates = raw.map((c) => {
       const withSlash = applyBassSlash(
         c.label,
@@ -399,9 +438,20 @@ export function detectChordsFromNotes(
     observations.push({ startMs: w.startMs, endMs: w.endMs, candidates });
   }
 
-  const labels = viterbiSmooth(observations, 0.72 + (1 - simplifyLevel) * 0.1);
+  const labels = metricDecode
+    ? viterbiSmoothMetric(observations, downbeat.beatInBar, {
+        selfBias: 0.58,
+        sameRootBias: 0.2,
+        // change preferred at downbeat (0), ok at beat 3 (2), rare on 2/4
+        changeCost: [-0.03, -0.3, -0.11, -0.27],
+      })
+    : viterbiSmoothMetric(
+        observations,
+        observations.map(() => 0),
+        { selfBias: 0.72 + (1 - simplifyLevel) * 0.1, changeCost: [-0.12, -0.12, -0.12, -0.12] },
+      );
 
-  // Median-filter single-beat flips
+  // Median-filter single-beat flips (keep metric structure)
   for (let i = 1; i < labels.length - 1; i++) {
     const a = formatChord(labels[i - 1]!, false);
     const b = formatChord(labels[i]!, false);
@@ -439,7 +489,16 @@ export function detectChordsFromNotes(
     if (p) c.chord = formatChord(p, key);
   }
 
-  return { chords, key, bpm, timeSig, beats, simplifyLevel };
+  return {
+    chords,
+    key,
+    bpm,
+    timeSig,
+    beats,
+    simplifyLevel,
+    downbeatPhase: downbeat.phase,
+    beatInBar: downbeat.beatInBar,
+  };
 }
 
 /**

@@ -79,10 +79,13 @@ describe('detectChordsFromNotes', () => {
 
     const result = detectChordsFromNotes(notes, bass, 8000, {
       bpmHint: 120,
-      halfBar: true,
+      metricDecode: true,
       simplifyLevel: 0.55,
     });
     expect(result.chords.length).toBeGreaterThan(0);
+    expect(result.downbeatPhase).toBeGreaterThanOrEqual(0);
+    expect(result.downbeatPhase).toBeLessThan(4);
+    expect(result.beatInBar?.length).toBeGreaterThan(0);
     const roots = result.chords.map((c) => parseChord(c.chord)?.root);
     expect(roots).toContain(5); // F
     expect(roots).toContain(0); // C

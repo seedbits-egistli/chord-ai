@@ -1,5 +1,5 @@
 import { formatChord, qualityComplexity, simplifyLabel } from './chordParse.js';
-import { cosineSimilarity, getTemplates } from './templates.js';
+import { QUALITY_INTERVALS, cosineSimilarity, getTemplates } from './templates.js';
 import type { ChordLabel, ChordQuality } from './types.js';
 
 export interface MatchCandidate {
@@ -12,6 +12,8 @@ export interface MatchContext {
   keyPrior?: string;
   /** Scales bass agreement (default 1). Lower when bass stem energy is weak. */
   bassWeight?: number;
+  /** 0–1 scales out-of-key tone penalty. Default 0.55 when keyPrior set. */
+  keyConfidence?: number;
 }
 
 function nameToPc(n: string): number | null {
@@ -20,6 +22,17 @@ function nameToPc(n: string): number | null {
     'F#': 6, Gb: 6, G: 7, 'G#': 8, Ab: 8, A: 9, 'A#': 10, Bb: 10, B: 11,
   };
   return map[n] ?? null;
+}
+
+function scalePcs(key: string): Set<number> | null {
+  const isMinor = key.endsWith('m');
+  const keyRootName = isMinor ? key.slice(0, -1) : key;
+  const kr = nameToPc(keyRootName);
+  if (kr === null) return null;
+  const intervals = isMinor
+    ? [0, 2, 3, 5, 7, 8, 10]
+    : [0, 2, 4, 5, 7, 9, 11];
+  return new Set(intervals.map((i) => (kr + i) % 12));
 }
 
 function diatonicBonus(root: number, quality: ChordQuality, key: string): number {
@@ -38,7 +51,32 @@ function diatonicBonus(root: number, quality: ChordQuality, key: string): number
   if (!isMinor && rel === 9 && quality === 'min') return 0.8;
   if (isMinor && rel === 0 && (quality === 'min' || quality === 'min7')) return 1;
   if (isMinor && rel === 3 && quality === 'maj') return 0.7; // relative major
+  if (
+    isMinor &&
+    (quality === 'sus2' || quality === 'sus4' || quality === '7sus4') &&
+    scale.has(rel)
+  ) {
+    return 0.45;
+  }
   return 0.15;
+}
+
+/** Mild penalty for chord tones outside the estimated key scale. */
+function outOfKeyTonePenalty(
+  root: number,
+  quality: ChordQuality,
+  scale: Set<number>,
+): number {
+  const iv = QUALITY_INTERVALS[quality] ?? [0, 4, 7];
+  let out = 0;
+  for (const i of iv) {
+    if (!scale.has((root + i) % 12)) out++;
+  }
+  if (out === 0) return 0;
+  let pen = 0.05 * out;
+  if (quality === 'aug') pen += 0.12;
+  if (quality === 'dim' || quality === 'dim7') pen += 0.06;
+  return pen;
 }
 
 /** Top-k matches for Viterbi */
@@ -55,6 +93,10 @@ export function topKMatches(
       : keyPriorOrCtx;
   const keyPrior = ctx.keyPrior;
   const bassWeight = Math.max(0, Math.min(1.5, ctx.bassWeight ?? 1));
+  const useEnhancedKey = ctx.keyConfidence !== undefined;
+  const keyConf = Math.max(0, Math.min(1, ctx.keyConfidence ?? 0));
+  const scale =
+    keyPrior && useEnhancedKey && keyConf > 0.3 ? scalePcs(keyPrior) : null;
 
   const templates = getTemplates();
   const scored: MatchCandidate[] = [];
@@ -88,7 +130,15 @@ export function topKMatches(
     }
     score -= complexityWeight * qualityComplexity(t.quality);
     if (noisy && qualityComplexity(t.quality) >= 2) score -= 0.12;
-    if (keyPrior) score += 0.045 * diatonicBonus(t.root, t.quality, keyPrior);
+    if (keyPrior) {
+      if (useEnhancedKey) {
+        score += 0.055 * keyConf * diatonicBonus(t.root, t.quality, keyPrior);
+        if (scale) score -= keyConf * outOfKeyTonePenalty(t.root, t.quality, scale);
+      } else {
+        // Legacy string keyPrior path (fast mode / older callers)
+        score += 0.045 * diatonicBonus(t.root, t.quality, keyPrior);
+      }
+    }
 
     // Guard: a single neighbor-semitone shouldn't invent aug (#5)
     if (t.quality === 'aug') {
@@ -132,13 +182,49 @@ function labelKey(l: ChordLabel): string {
  * Viterbi smoothing — prefer staying on same chord / same root.
  */
 export function viterbiSmooth(observations: BeatObservation[], selfBias = 0.35): ChordLabel[] {
+  return viterbiSmoothMetric(
+    observations,
+    observations.map(() => 0),
+    { selfBias, changeCost: [-0.12, -0.12, -0.12, -0.12] },
+  );
+}
+
+export interface MetricViterbiOptions {
+  /** Bonus for staying on the same label. Default 0.55. */
+  selfBias?: number;
+  /** Extra stay bonus for same root / different quality. Default 0.18. */
+  sameRootBias?: number;
+  /**
+   * Additive score when *changing* chord into metric position 0..3
+   * (0 = downbeat). More negative = harder to change.
+   * Default: easy on 1, medium on 3, hard on 2/4.
+   */
+  changeCost?: [number, number, number, number];
+}
+
+/**
+ * Beat-level HMM/Viterbi with metric-position transition prior (training-free).
+ * Simplifies Mauch & Dixon (2010) metric-position dependence without learning.
+ */
+export function viterbiSmoothMetric(
+  observations: BeatObservation[],
+  beatInBar: number[],
+  options: MetricViterbiOptions = {},
+): ChordLabel[] {
   if (observations.length === 0) return [];
   const T = observations.length;
+  const selfBias = options.selfBias ?? 0.55;
+  const sameRootBias = options.sameRootBias ?? 0.18;
+  // Hand-set: change preferred at downbeat (0), ok at beat 3 (2), rare on 2/4
+  const changeCost = options.changeCost ?? [-0.04, -0.28, -0.12, -0.26];
+
   const pathScore: number[][] = [];
   const back: number[][] = [];
 
   for (let t = 0; t < T; t++) {
     const cands = observations[t]!.candidates;
+    const pos = beatInBar[t] ?? 0;
+    const chCost = changeCost[((pos % 4) + 4) % 4]!;
     pathScore[t] = [];
     back[t] = [];
     for (let j = 0; j < cands.length; j++) {
@@ -155,8 +241,8 @@ export function viterbiSmooth(observations: BeatObservation[], selfBias = 0.35):
         const same = labelKey(prev[i]!.label) === labelKey(cands[j]!.label);
         const sameRoot = prev[i]!.label.root === cands[j]!.label.root;
         if (same) s += selfBias;
-        else if (sameRoot) s += selfBias * 0.35;
-        else s -= 0.12;
+        else if (sameRoot) s += sameRootBias + chCost * 0.35;
+        else s += chCost;
         if (s > best) {
           best = s;
           bestI = i;
