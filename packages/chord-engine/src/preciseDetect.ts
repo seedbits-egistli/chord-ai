@@ -398,10 +398,13 @@ export function detectChordsFromNotes(
   const simplifyLevel = options.simplifyLevel ?? 0.45;
   const metricDecode = options.metricDecode !== false;
   const droneFrac = options.droneWindowFrac ?? 0.42;
-  // Keep NNLS as a support feature: when Basic Pitch is dense/reliable it
-  // should dominate (protects Hey Jude); NNLS fills empty/sparse windows (WW intro).
-  const nnlsWeight = Math.min(1, Math.max(0, options.nnlsWeight ?? 0.4));
-  const useNnls = options.useNnls !== false;
+  const bassEnergyRatioEarly = options.bassEnergyRatio ?? 1;
+  const weakBassEarly = bassEnergyRatioEarly < 0.2;
+  // Auto-enable NNLS on weak-bass / guitar-drone mixes (e.g. Wonderwall).
+  // Strong-bass pop (Hey Jude) stays on the proven Basic Pitch path unless forced.
+  const useNnls =
+    options.useNnls === true || (options.useNnls !== false && weakBassEarly);
+  const nnlsWeight = Math.min(1, Math.max(0, options.nnlsWeight ?? (weakBassEarly ? 0.55 : 0.25)));
 
   let bpm = options.bpmHint ?? 120;
   let beats: number[] = [];
@@ -692,10 +695,15 @@ export function detectChordsPreciseFromStems(
   bassNotes: NoteEvent[],
   options: PreciseDetectOptions = {},
 ): DetectionResult {
-  const vocalResidual = options.vocalResidual ?? 0.18;
   const vocals = stemToMono(stems.vocals.left, stems.vocals.right);
   const other = stemToMono(stems.other.left, stems.other.right);
   const bass = stemToMono(stems.bass.left, stems.bass.right);
+  const bassEnergyRatio =
+    options.bassEnergyRatio ?? rmsEnergy(bass) / Math.max(1e-9, rmsEnergy(other));
+  const weakBass = bassEnergyRatio < 0.2;
+  // Vocal residual / leak filter only on weak-bass paths (guitar mixes)
+  const vocalResidual =
+    options.vocalResidual ?? (weakBass ? 0.22 : 0);
   let instrumental = buildInstrumental(stems);
   if (vocalResidual > 0) {
     instrumental = subtractVocalResidual(instrumental, vocals, vocalResidual);
@@ -705,19 +713,19 @@ export function detectChordsPreciseFromStems(
     for (let i = 0; i < instrumental.length; i++) instrumental[i]! *= g;
   }
   const durationMs = (instrumental.length / stems.sampleRate) * 1000;
-  const bassEnergyRatio =
-    options.bassEnergyRatio ?? rmsEnergy(bass) / Math.max(1e-9, rmsEnergy(other));
-  const filteredOther = filterVocalLeakNotes(
-    accompanimentNotes,
-    other,
-    vocals,
-    stems.sampleRate,
-  );
+  const filteredOther = weakBass
+    ? filterVocalLeakNotes(accompanimentNotes, other, vocals, stems.sampleRate)
+    : accompanimentNotes;
   return detectChordsFromNotes(
     filteredOther,
     bassNotes,
     durationMs,
-    { ...options, bassEnergyRatio, vocalSamples: vocals },
+    {
+      ...options,
+      bassEnergyRatio,
+      vocalSamples: vocals,
+      useNnls: options.useNnls === true || (options.useNnls !== false && weakBass),
+    },
     {
       samples: instrumental,
       sampleRate: stems.sampleRate,

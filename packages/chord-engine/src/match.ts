@@ -132,19 +132,16 @@ function distinctiveIntervalBonus(
   const nov7 = localNovelty?.[(root + 10) % 12] ?? 0.5;
 
   if (quality === 'sus4' || quality === '7sus4') {
-    if (fourth > peak * 0.28 && fourth >= thirdM * 0.95 && fourth >= thirdm * 0.95) {
-      bonus += 0.1 + 0.06 * Math.min(1, nov4);
+    if (fourth > peak * 0.32 && fourth >= thirdM * 1.05 && fourth >= thirdm * 1.05) {
+      bonus += 0.08 + 0.05 * Math.min(1, nov4);
     }
-    // Penalise plain maj/min confusion handled by their weaker 4th — boost sus
-    if (fourth > thirdM && fourth > thirdm) bonus += 0.04;
   }
   if (quality === '7' || quality === '7sus4' || quality === 'min7') {
-    if (b7 > peak * 0.22) bonus += 0.07 + 0.05 * Math.min(1, nov7);
+    if (b7 > peak * 0.28) bonus += 0.05 + 0.04 * Math.min(1, nov7);
   }
   if (quality === 'maj' || quality === 'min') {
-    // If a strong 4th is present without a clear 3rd, demote plain triad
-    if (fourth > peak * 0.4 && fourth > Math.max(thirdM, thirdm) * 1.15) {
-      bonus -= 0.08;
+    if (fourth > peak * 0.5 && fourth > Math.max(thirdM, thirdm) * 1.35) {
+      bonus -= 0.05;
     }
   }
   return bonus;
@@ -185,7 +182,7 @@ export function topKMatches(
     // Blend cosine (shape) with size-normalised presence (fairer to sus/7sus4)
     const cos = cosineSimilarity(chroma, t.vector);
     const presence = templatePresenceScore(chroma, t.root, t.quality);
-    let score = 0.72 * cos + 0.28 * Math.max(-0.5, Math.min(1.2, presence));
+    let score = 0.85 * cos + 0.15 * Math.max(-0.5, Math.min(1.2, presence));
 
     // Soft drone discount on identity: reduce score contribution of static PCs
     // unless they are distinctive chord tones with local novelty
