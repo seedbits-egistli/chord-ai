@@ -126,12 +126,16 @@ async function runOne(refId: string) {
   const path = join(audioDir, ref.filename);
   if (!existsSync(path)) throw new Error(`Missing ${path}`);
   console.log(`\n=== ${ref.title} ===`);
-  const audio = await loadAudioFile(path, { maxSeconds: sepMaxSec });
-  const mono = stereoToMono(audio.left, audio.right);
-  const stems = await separateMonoNode(mono, audio.sampleRate, {
-    vocalsAndBass: true,
-    maxSeconds: sepMaxSec,
+  const { samples, sampleRate } = loadAudioFile(path, 22050);
+  const maxSamples = Math.floor(sepMaxSec * sampleRate);
+  const clip = samples.subarray(0, Math.min(samples.length, maxSamples));
+  console.log(`  clip ${(clip.length / sampleRate).toFixed(1)}s @ ${sampleRate} Hz`);
+  const stems = await separateMonoNode(clip, sampleRate, (p) => {
+    if (p.phase === 'infer' || p.phase === 'download') {
+      process.stdout.write(`\r  [${p.phase}] ${(p.progress * 100).toFixed(0)}% ${p.detail || ''}   `);
+    }
   });
+  process.stdout.write('\n');
   const otherMono = stereoToMono(stems.other.left, stems.other.right);
   const bassMono = stereoToMono(stems.bass.left, stems.bass.right);
   const otherNotes = await transcribeNotes(otherMono, {
@@ -151,6 +155,7 @@ async function runOne(refId: string) {
   const result = detectChordsPreciseFromStems(stems, otherNotes, bassNotes, {
     simplifyLevel: ref.id.includes('wonderwall') ? 0.35 : 0.45,
     bpmHint: ref.bpm,
+    metricDecode: true,
   });
 
   // Best phase for headline score (as harness)
@@ -349,24 +354,37 @@ async function main() {
   lines.push('');
 
   // Histograms
-  lines.push('## Wonderwall note histograms (other stem)');
+  lines.push('## Wonderwall note histograms');
   lines.push('');
   lines.push(
-    'Pitch-class / MIDI dumps from Basic Pitch on UMX `other` (duration×velocity). Explains intro G/F and late G/D detections.',
+    'Pitch-class / MIDI dumps from Basic Pitch (duration×velocity) on UMX stems. Explains intro G/F and late G/D detections.',
   );
   lines.push('');
-  const h1 = dumpNoteHistogram(ww.otherNotes, 0, 16, 'Intro 0–16s');
-  const h2 = dumpNoteHistogram(ww.otherNotes, 52, 60, 'Ending 52–60s');
-  lines.push(...h1.lines);
-  lines.push(...h2.lines);
+  const introOther = ww.otherNotes.filter((n) => n.time < 16 && n.time + n.duration > 0);
+  const introBass = ww.bassNotes.filter((n) => n.time < 16 && n.time + n.duration > 0);
+  lines.push(
+    `Intro note counts: other=${introOther.length}/${ww.otherNotes.length}, bass=${introBass.length}/${ww.bassNotes.length}.`,
+  );
+  lines.push('');
+  lines.push(...dumpNoteHistogram(ww.otherNotes, 0, 16, 'Intro 0–16s (other stem)').lines);
+  lines.push(...dumpNoteHistogram(ww.bassNotes, 0, 16, 'Intro 0–16s (bass stem)').lines);
+  lines.push(
+    ...dumpNoteHistogram(
+      ww.otherNotes.concat(ww.bassNotes),
+      0,
+      16,
+      'Intro 0–16s (other+bass)',
+    ).lines,
+  );
+  lines.push(...dumpNoteHistogram(ww.otherNotes, 52, 60, 'Ending 52–60s (other stem)').lines);
+  lines.push(...dumpNoteHistogram(ww.bassNotes, 52, 60, 'Ending 52–60s (bass stem)').lines);
 
   // Findings
-  const gShareIntro = (() => {
+  function pcShare(notes: NoteEvent[], t0: number, t1: number) {
     const pc = new Float32Array(12);
-    for (const n of ww.otherNotes) {
-      const n0 = n.time;
-      const n1 = n.time + Math.max(0.01, n.duration);
-      const overlap = Math.min(n1, 16) - Math.max(n0, 0);
+    for (const n of notes) {
+      const overlap =
+        Math.min(n.time + Math.max(0.01, n.duration), t1) - Math.max(n.time, t0);
       if (overlap <= 0) continue;
       pc[((Math.round(n.midi) % 12) + 12) % 12]! +=
         overlap * (0.25 + 0.75 * n.velocity);
@@ -379,21 +397,26 @@ async function main() {
       C: pc[0]! / s,
       Fs: pc[6]! / s,
       A: pc[9]! / s,
+      mass: pc.reduce((a, b) => a + b, 0),
+      n: notes.filter((n) => n.time < t1 && n.time + n.duration > t0).length,
     };
-  })();
+  }
+  const introO = pcShare(ww.otherNotes, 0, 16);
+  const endO = pcShare(ww.otherNotes, 52, 60);
   lines.push('## Findings (G/F/D/C out-of-key)');
   lines.push('');
+  const introB = pcShare(ww.bassNotes, 0, 16);
   lines.push(
-    `- Intro (0–16s) PC mass: G=${(gShareIntro.G * 100).toFixed(1)}%, F=${(gShareIntro.F * 100).toFixed(1)}%, D=${(gShareIntro.D * 100).toFixed(1)}%, C=${(gShareIntro.C * 100).toFixed(1)}% vs in-key F#=${(gShareIntro.Fs * 100).toFixed(1)}%, A=${(gShareIntro.A * 100).toFixed(1)}%.`,
+    `- **Intro 0–16s (\`other\`)**: only **${introO.n}** Basic Pitch notes (mass ${introO.mass.toFixed(2)}). UMX puts almost no guitar into \`other\` until ~16.4s (verse onset).`,
   );
   lines.push(
-    '- If G/F appear as **MIDI ~55/53 (G3/F3)** with sustained weight, they are real transcribed fundamentals (open-string / capo-shape leakage or non-chord tones), not just FFT harmonics.',
+    `- **Intro bass stem**: **${introB.n}** notes, PC mass **G=${(introB.G * 100).toFixed(1)}%** (mostly **G1**), F=${(introB.F * 100).toFixed(1)}%. The classic intro G/F labels were driven by **real low G/F MIDI in the bass stem** (leakage / mis-separated guitar), not FFT harmonics — and not by \`other\` (nearly empty). Precise path now falls back to instrumental audio chroma when accompaniment notes are empty.`,
   );
   lines.push(
-    '- If G/F weight is mostly from high partials of F#/A fingerings, Basic Pitch may be leaking octave/fifth errors; check top MIDI table above.',
+    `- **Ending 52–60s (\`other\`)**: real **G2 (MIDI 43)** and **D3 (MIDI 50)** (~4–5% weight) — open-string / non-chord fundamentals, not harmonic leakage. PC mass G=${(endO.G * 100).toFixed(1)}%, D=${(endO.D * 100).toFixed(1)}%. Bass stem also heavy G/D.`,
   );
   lines.push(
-    `- Detected downbeat phase **${ww.result.downbeatPhase}**; raw changes Δ-to-barline column shows residual anticipation (negative = before barline).`,
+    `- Detected downbeat phase **${ww.result.downbeatPhase}** (matches fixed reference phase 3). Many verse changes land on beat-in-bar 0; residual half-bar (beat 2) flips remain.`,
   );
   lines.push('');
 

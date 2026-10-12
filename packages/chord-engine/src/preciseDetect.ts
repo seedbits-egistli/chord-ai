@@ -370,15 +370,19 @@ export function detectChordsFromNotes(
     let chroma = noteChroma(accompanimentNotes, w.startSec, w.endSec, hardDrones);
     let peak = 0;
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
-    if (peak < 0.05) {
+    const accompEmpty = peak < 0.05;
+    // When UMX "other" is silent (WW intro: ~0 notes until verse), do NOT let
+    // bass-stem leakage invent the harmony — prefer instrumental audio chroma.
+    if (accompEmpty && audioFrames) {
+      chroma = averageChroma(audioFrames, w.startMs, w.endMs).chroma;
+      normalizeL2(chroma);
+    } else if (accompEmpty) {
       chroma = noteChroma(allNotes, w.startSec, w.endSec);
-      peak = 0;
-      for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     }
-    if (options.suppressDrone !== false) {
+    if (options.suppressDrone !== false && !accompEmpty) {
       subtractDroneMean(chroma, droneMean, weakBass ? 0.62 : 0.55);
     }
-    if (audioFrames && audioBlend > 0) {
+    if (audioFrames && audioBlend > 0 && !accompEmpty) {
       const ac = averageChroma(audioFrames, w.startMs, w.endMs).chroma;
       for (let p = 0; p < 12; p++) {
         chroma[p] = chroma[p]! * (1 - audioBlend) + ac[p]! * audioBlend;
@@ -387,6 +391,7 @@ export function detectChordsFromNotes(
     }
     peak = 0;
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
+    const noteSparse = peak < 0.08;
 
     const bass = lowestBassPc(bassNotes, w.startSec, w.endSec);
     const proxy = lowestSustainedPc(accompanimentNotes, w.startSec, w.endSec, 58);
@@ -404,15 +409,23 @@ export function detectChordsFromNotes(
     }
     normalizeL2(bassChroma);
 
-    if (peak < 0.08) {
-      const hold =
-        observations.length > 0
-          ? { ...observations[observations.length - 1]!.candidates[0]!.label }
-          : ({ root: 0, quality: 'maj' } as ChordLabel);
+    if (noteSparse) {
+      let hold: ChordLabel;
+      if (observations.length > 0) {
+        hold = { ...observations[observations.length - 1]!.candidates[0]!.label };
+      } else {
+        // Seed from global key estimate (notes often denser later in the clip)
+        const isMinor = key.endsWith('m');
+        const p = parseChord(key);
+        hold = {
+          root: p?.root ?? 0,
+          quality: isMinor ? 'min' : 'maj',
+        };
+      }
       observations.push({
         startMs: w.startMs,
         endMs: w.endMs,
-        candidates: [{ label: hold, score: -0.15 }],
+        candidates: [{ label: hold, score: -0.2 }],
       });
       continue;
     }
