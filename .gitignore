@@ -17,6 +17,9 @@ coverage/
 test-audio/
 fixtures/audio/
 docs/validation-results.json
+docs/wonderwall-diagnosis-assets/chroma.json
+docs/wonderwall-diagnosis-assets/diag-data.json
+docs/wonderwall-diagnosis-assets/plot.py
 *.log
 *.onnx
 /tmp/
