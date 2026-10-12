@@ -338,13 +338,14 @@ export function filterVocalLeakNotes(
       const vR = rmsInRange(vocals, sampleRate, t0, t1);
       const oR = rmsInRange(other, sampleRate, t0, t1);
       let vel = n.velocity;
-      if (vR > 1e-6 && vR > oR * 1.15) {
+      // Only strongly vocal-dominated windows (avoid hurting dense pop mixes)
+      if (vR > 1e-6 && vR > oR * 1.8) {
         const ratio = vR / Math.max(1e-6, oR);
-        vel *= Math.max(0.15, 1 / (0.5 + ratio));
+        vel *= Math.max(0.4, 1 / (0.35 + 0.4 * ratio));
       }
       return { ...n, velocity: vel };
     })
-    .filter((n) => n.velocity >= 0.08);
+    .filter((n) => n.velocity >= 0.05);
 }
 
 /** Per-PC drone strength (high mean, low variance across beats) ∈ [0,1]. */
@@ -397,7 +398,9 @@ export function detectChordsFromNotes(
   const simplifyLevel = options.simplifyLevel ?? 0.45;
   const metricDecode = options.metricDecode !== false;
   const droneFrac = options.droneWindowFrac ?? 0.42;
-  const nnlsWeight = Math.min(1, Math.max(0, options.nnlsWeight ?? 0.55));
+  // Keep NNLS as a support feature: when Basic Pitch is dense/reliable it
+  // should dominate (protects Hey Jude); NNLS fills empty/sparse windows (WW intro).
+  const nnlsWeight = Math.min(1, Math.max(0, options.nnlsWeight ?? 0.4));
   const useNnls = options.useNnls !== false;
 
   let bpm = options.bpmHint ?? 120;
@@ -459,12 +462,13 @@ export function detectChordsFromNotes(
     }
   }
 
+  // Downbeat from note chromas when available (NNLS-only on empty windows)
   const beatChromas = buildBeatChromas(windows.length, (i) => {
-    if (nnlsTreble[i]) return nnlsTreble[i]!;
     const w = windows[i]!;
     let ch = noteChroma(accompanimentNotes, w.startSec, w.endSec);
     let peak = 0;
     for (let p = 0; p < 12; p++) peak = Math.max(peak, ch[p]!);
+    if (peak < 0.05 && nnlsTreble[i]) return nnlsTreble[i]!;
     if (peak < 0.05) ch = noteChroma(allNotes, w.startSec, w.endSec);
     return ch;
   });
@@ -505,14 +509,16 @@ export function detectChordsFromNotes(
     let chroma = new Float32Array(12);
     const nt = nnlsTreble[bi];
     if (nt && nnlsWeight > 0) {
-      const bpW = (1 - nnlsWeight) * bpReliability;
-      const nnW = nnlsWeight + (1 - nnlsWeight) * (1 - bpReliability);
-      if (bpW > 0.05) {
+      // High BP reliability → mostly notes; sparse/empty → mostly NNLS
+      const nnW = Math.min(0.85, nnlsWeight * (1.15 - 0.95 * bpReliability));
+      const bpW = Math.max(0, 1 - nnW) * (bpReliability > 0.05 ? 1 : 0);
+      if (bpW > 0.08) {
         for (let p = 0; p < 12; p++) chroma[p] = nnW * nt[p]! + bpW * noteCh[p]!;
+        normalizeL2(chroma);
       } else {
         chroma.set(nt);
+        normalizeL2(chroma);
       }
-      normalizeL2(chroma);
     } else if (!accompEmpty) {
       chroma.set(noteCh);
       if (options.suppressDrone !== false) {
@@ -533,12 +539,14 @@ export function detectChordsFromNotes(
       normalizeL2(chroma);
     }
 
-    if (options.suppressDrone !== false) {
+    // Soft drone discount — lighter when Basic Pitch is already reliable
+    if (options.suppressDrone !== false && bpReliability < 0.75) {
+      const amt = 0.35 + 0.25 * (1 - bpReliability);
       for (let p = 0; p < 12; p++) {
         const d = droneStrength[p]!;
         const nov = localNovelty[bi]![p]!;
-        const keep = nov > 0.4 ? 0.25 : 1;
-        chroma[p] = Math.max(0, chroma[p]! - 0.5 * d * keep * droneMean[p]!);
+        const keep = nov > 0.4 ? 0.2 : 1;
+        chroma[p] = Math.max(0, chroma[p]! - amt * d * keep * droneMean[p]!);
       }
       normalizeL2(chroma);
     }
@@ -551,9 +559,16 @@ export function detectChordsFromNotes(
     const proxy = lowestSustainedPc(accompanimentNotes, w.startSec, w.endSec, 58);
     const bassChroma = new Float32Array(12);
     const nb = nnlsBassArr[bi];
-    if (nb && nnlsWeight > 0.2) {
+    if (bassHit && !weakBass) {
+      // Strong bass stem: trust Basic Pitch bass (protects Hey Jude roots)
+      bassChroma[bassHit.pc] = 1;
+      if (nb) {
+        for (let p = 0; p < 12; p++) bassChroma[p]! += 0.25 * nb[p]!;
+      }
+    } else if (nb && nnlsWeight > 0.2) {
       bassChroma.set(nb);
       if (bassHit) bassChroma[bassHit.pc]! += 0.35;
+      else if (proxy) bassChroma[proxy.pc]! += 0.25;
     } else if (bassHit) {
       bassChroma[bassHit.pc] = 1;
     } else if (proxy) {
@@ -677,7 +692,7 @@ export function detectChordsPreciseFromStems(
   bassNotes: NoteEvent[],
   options: PreciseDetectOptions = {},
 ): DetectionResult {
-  const vocalResidual = options.vocalResidual ?? 0.25;
+  const vocalResidual = options.vocalResidual ?? 0.18;
   const vocals = stemToMono(stems.vocals.left, stems.vocals.right);
   const other = stemToMono(stems.other.left, stems.other.right);
   const bass = stemToMono(stems.bass.left, stems.bass.right);
