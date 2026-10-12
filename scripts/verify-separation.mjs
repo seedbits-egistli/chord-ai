@@ -74,12 +74,12 @@ async function main() {
       }
     }
     // Free the port so Vite does not silently move to 5174 while we poll 5173.
-    try {
-      spawn('fuser', ['-k', '5173/tcp'], { stdio: 'ignore' });
-    } catch {
-      /* ignore */
-    }
-    await sleep(500);
+    await new Promise((resolve) => {
+      const killer = spawn('fuser', ['-k', '5173/tcp'], { stdio: 'ignore' });
+      killer.on('error', () => resolve());
+      killer.on('exit', () => resolve());
+      setTimeout(resolve, 800);
+    });
     viteProc = spawn(
       'npm',
       [
