@@ -22,6 +22,11 @@ export interface MatchContext {
   droneStrength?: ArrayLike<number>;
   /** Per-PC local novelty 0–1 (change vs neighbour beats). */
   localNovelty?: ArrayLike<number>;
+  /**
+   * Enable size-normalised presence blend + sus/7 distinctive bonuses +
+   * drone identity discount. Off by default (preserves strong-bass pop scores).
+   */
+  extendedHarmony?: boolean;
 }
 
 function nameToPc(n: string): number | null {
@@ -175,17 +180,18 @@ export function topKMatches(
   for (let i = 0; i < 12; i++) peak = Math.max(peak, chroma[i]!);
   const noisy = peak < 0.45;
 
-  const drone = ctx.droneStrength;
-  const novelty = ctx.localNovelty;
+  const ext = !!ctx.extendedHarmony;
+  const drone = ext ? ctx.droneStrength : undefined;
+  const novelty = ext ? ctx.localNovelty : undefined;
 
   for (const t of templates) {
-    // Blend cosine (shape) with size-normalised presence (fairer to sus/7sus4)
     const cos = cosineSimilarity(chroma, t.vector);
-    const presence = templatePresenceScore(chroma, t.root, t.quality);
-    let score = 0.85 * cos + 0.15 * Math.max(-0.5, Math.min(1.2, presence));
+    let score = cos;
+    if (ext) {
+      const presence = templatePresenceScore(chroma, t.root, t.quality);
+      score = 0.8 * cos + 0.2 * Math.max(-0.5, Math.min(1.2, presence));
+    }
 
-    // Soft drone discount on identity: reduce score contribution of static PCs
-    // unless they are distinctive chord tones with local novelty
     if (drone) {
       const iv = QUALITY_INTERVALS[t.quality] ?? [0, 4, 7];
       let dronePen = 0;
@@ -193,7 +199,6 @@ export function topKMatches(
         const pc = (t.root + i) % 12;
         const d = drone[pc] ?? 0;
         const nov = novelty?.[pc] ?? 0;
-        // keep sus/7 tones when they move relative to neighbours
         const keep =
           (t.quality === 'sus4' || t.quality === '7sus4' || t.quality === '7') &&
           (i === 5 || i === 10) &&
@@ -206,7 +211,6 @@ export function topKMatches(
     // Bass: strongly prefer root in bass (separates F vs Am, etc.)
     const bassAgree = cosineSimilarity(bassChroma, t.bassBias);
     score += 0.22 * bassWeight * bassAgree;
-    // Soft penalty if dominant bass PC is far from root/third/fifth
     let bassPc = 0;
     let bassPeak = -1;
     for (let i = 0; i < 12; i++) {
@@ -222,25 +226,22 @@ export function topKMatches(
       }
       if (rel === 0) score += 0.06 * bassWeight;
     }
-    // Milder complexity penalty for sus/7sus4 so they compete fairly with triads
     let cq = qualityComplexity(t.quality);
-    if (t.quality === 'sus4' || t.quality === '7sus4') cq = Math.max(0, cq - 0.5);
+    if (ext && (t.quality === 'sus4' || t.quality === '7sus4')) cq = Math.max(0, cq - 0.5);
     score -= complexityWeight * cq;
     if (noisy && cq >= 2) score -= 0.12;
 
-    score += distinctiveIntervalBonus(chroma, t.root, t.quality, peak, novelty);
+    if (ext) score += distinctiveIntervalBonus(chroma, t.root, t.quality, peak, novelty);
 
     if (keyPrior) {
       if (useEnhancedKey) {
         score += 0.055 * keyConf * diatonicBonus(t.root, t.quality, keyPrior);
         if (scale) score -= keyConf * outOfKeyTonePenalty(t.root, t.quality, scale);
       } else {
-        // Legacy string keyPrior path (fast mode / older callers)
         score += 0.045 * diatonicBonus(t.root, t.quality, keyPrior);
       }
     }
 
-    // Guard: a single neighbor-semitone shouldn't invent aug (#5)
     if (t.quality === 'aug') {
       const sharp5 = chroma[(t.root + 8) % 12]!;
       const fifth = chroma[(t.root + 7) % 12]!;

@@ -606,8 +606,9 @@ export function detectChordsFromNotes(
       keyPrior: key,
       keyConfidence,
       bassWeight: weakBass ? 0.55 : 1,
-      droneStrength,
-      localNovelty: localNovelty[bi],
+      extendedHarmony: weakBass || useNnls,
+      droneStrength: weakBass || useNnls ? droneStrength : undefined,
+      localNovelty: weakBass || useNnls ? localNovelty[bi] : undefined,
     };
     const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, matchCtx);
     const candidates = raw.map((c) => {
