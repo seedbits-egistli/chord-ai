@@ -542,8 +542,8 @@ export function detectChordsFromNotes(
       normalizeL2(chroma);
     }
 
-    // Soft drone discount — lighter when Basic Pitch is already reliable
-    if (options.suppressDrone !== false && bpReliability < 0.75) {
+    // Soft drone discount on weak-bass / NNLS paths only
+    if (options.suppressDrone !== false && (weakBass || useNnls) && bpReliability < 0.75) {
       const amt = 0.35 + 0.25 * (1 - bpReliability);
       for (let p = 0; p < 12; p++) {
         const d = droneStrength[p]!;
