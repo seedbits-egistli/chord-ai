@@ -22,10 +22,12 @@
     "validate": "npm run validate -w @chord-ai/engine",
     "db:migrate:local": "wrangler d1 migrations apply chord-ai --local --persist-to worker/.wrangler/state",
     "deploy:dry": "npm run build && node scripts/ensure-web-dist.mjs && echo \"Run: wrangler deploy (requires Cloudflare credentials)\"",
-    "typecheck": "npm run typecheck -w @chord-ai/engine && npm run typecheck -w @chord-ai/web && npm run typecheck -w @chord-ai/worker"
+    "typecheck": "npm run typecheck -w @chord-ai/engine && npm run typecheck -w @chord-ai/web && npm run typecheck -w @chord-ai/worker",
+    "verify:cache": "node scripts/verify-model-cache.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "playwright-core": "^1.64.0",
     "typescript": "^5.8.2",
     "wrangler": "^4.14.0"
   }
