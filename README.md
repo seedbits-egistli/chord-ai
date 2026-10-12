@@ -8,7 +8,7 @@
 
 - 輸入：麥克風即時錄音、音檔上傳（無串流平台）
 - 和弦：自研 MIT chroma 模板比對（含七和弦、sus、dim、aug、延伸、slash）+ 節拍 / 調性 / Viterbi 平滑
-- **可選音源分離**：HTDemucs ONNX（`demucs-web` + ONNX Runtime Web／WebGPU，WASM 後備）先去掉人聲／鼓，再用貝斯軌強化根音；桌面 WebGPU 預設開、手機預設關；模型約 172MB 惰性下載（可改 R2）。授權見 [`docs/models.md`](docs/models.md)
+- **進階模式（預設關閉）音源分離**：Open-Unmix **UMX-HQ** ONNX（~34MB vocals+bass，MIT）+ ONNX Runtime Web（WASM／WebGPU；ORT wasm 走 CDN，不進 Workers 靜態資產）。授權見 [`docs/models.md`](docs/models.md)
 - 「簡化和弦」滑桿 + click-to-fix 編輯
 - 移調 ±半音（升降記號依調）、Capo 建議、按法圖同步
 - 歌詞貼上後以時間錨點顯示「和弦在歌詞上方」
@@ -31,7 +31,7 @@
 
 ### 需求
 
-- Node 20+
+- **Node ≥ 22**（見 `.nvmrc`；建議 `nvm use`）
 - npm
 - [Wrangler](https://developers.cloudflare.com/workers/wrangler/)（已在 root `devDependencies`）
 - 真實錄音驗證另需 `ffmpeg`
@@ -68,12 +68,12 @@ npm run dev
 npm test
 npm run validate -w @chord-ai/engine
 
-# 可選：本機真實錄音 + HTDemucs before/after（勿提交 mp3；首次會下載 ~172MB ONNX）
-CHORD_AI_TEST_AUDIO=/path/to/dir CHORD_AI_SEPARATE=1 CHORD_AI_SEP_MAX_SEC=90 \
+# 可選：本機真實錄音 + UMX-HQ before/after（勿提交 mp3；首次約 34MB ONNX）
+CHORD_AI_TEST_AUDIO=/path/to/dir CHORD_AI_SEPARATE=1 CHORD_AI_SEP_MAX_SEC=60 \
   npm run validate:real -w @chord-ai/engine
 ```
 
-生產環境可把 ONNX 鏡到 R2，並設定前端 `VITE_DEMUCS_MODEL_URL`。Pages 需 COOP/COEP（`web/public/_headers`）以啟用多執行緒 WASM／SharedArrayBuffer。
+生產環境可把 ONNX 鏡到 R2，並設定 `VITE_UMX_VOCALS_URL` / `VITE_UMX_BASS_URL`。Pages 使用 COOP + COEP `credentialless`（`web/public/_headers`）以啟用多執行緒 WASM，並允許從 CDN 載入 ORT。`npm run dev` 會先建立 stub `web/dist`（含 `.assetsignore`），fresh clone 不必先 `vite build`。
 
 ## 部署到 Cloudflare（不要在此環境執行；需你的帳號）
 
@@ -114,4 +114,5 @@ worker/                  Workers API
 web/                     Pages SPA
 migrations/              D1 SQL
 docs/validation.md       準確率報告
+docs/models.md           分離模型授權與大小
 ```

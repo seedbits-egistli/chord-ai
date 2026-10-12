@@ -1,38 +1,37 @@
 /**
- * Node HTDemucs separator for validation (onnxruntime-node).
- * Model cached under CHORD_AI_MODEL_DIR (default /tmp/chord-ai-models).
+ * Node UMX-HQ separator for validation (onnxruntime-node).
+ * Models cached under CHORD_AI_MODEL_DIR (default /tmp/chord-ai-models).
  */
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as ort from 'onnxruntime-node';
-import { DemucsProcessor, CONSTANTS } from 'demucs-web';
 import {
-  DEMUCS_MODEL_URL,
-  DEMUCS_SAMPLE_RATE,
-  resampleLinear,
-  type SeparationStems,
-  type SeparateProgress,
-} from '../src/separate.js';
+  UMX_BASS_URL,
+  UMX_VOCALS_URL,
+  separateWithUmx,
+} from '../src/umx.js';
+import type { SeparationStems, SeparateProgress } from '../src/separate.js';
 
-export async function ensureDemucsModel(
+async function ensureModel(
+  filename: string,
+  url: string,
   onProgress?: (loaded: number, total: number) => void,
-): Promise<ArrayBuffer> {
+): Promise<Uint8Array> {
   const dir = process.env.CHORD_AI_MODEL_DIR || '/tmp/chord-ai-models';
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, 'htdemucs_embedded.onnx');
+  const path = join(dir, filename);
   if (existsSync(path)) {
-    const buf = readFileSync(path);
-    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    return new Uint8Array(readFileSync(path));
   }
-  const url = process.env.CHORD_AI_DEMUCS_URL || DEMUCS_MODEL_URL;
-  console.log('Downloading Demucs ONNX (~172MB)…', url);
+  console.log(`Downloading ${filename}…`, url);
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Model download failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Model download failed (${filename}): ${res.status}`);
   const total = Number(res.headers.get('content-length') || 0);
   if (!res.body) {
     const ab = await res.arrayBuffer();
-    writeFileSync(path, Buffer.from(ab));
-    return ab;
+    const u8 = new Uint8Array(ab);
+    writeFileSync(path, u8);
+    return u8;
   }
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -52,7 +51,7 @@ export async function ensureDemucsModel(
   }
   writeFileSync(path, combined);
   console.log('Saved model to', path);
-  return combined.buffer;
+  return combined;
 }
 
 export async function separateMonoNode(
@@ -60,51 +59,46 @@ export async function separateMonoNode(
   sampleRate: number,
   onProgress?: (p: SeparateProgress) => void,
 ): Promise<SeparationStems> {
-  onProgress?.({ phase: 'download', progress: 0.02, detail: 'model' });
-  const model = await ensureDemucsModel((loaded, total) => {
-    onProgress?.({
-      phase: 'download',
-      progress: total ? (loaded / total) * 0.3 : 0.15,
-      detail: `${(loaded / 1e6).toFixed(1)}MB`,
-    });
-  });
+  const wantBass = process.env.CHORD_AI_UMX_BASS !== '0';
+  onProgress?.({ phase: 'download', progress: 0.02, detail: 'vocals.onnx' });
+  const vocals = await ensureModel(
+    'umx_hq_vocals.onnx',
+    process.env.CHORD_AI_UMX_VOCALS_URL || UMX_VOCALS_URL,
+    (loaded, total) => {
+      onProgress?.({
+        phase: 'download',
+        progress: total ? (loaded / total) * 0.2 : 0.1,
+        detail: `vocals ${(loaded / 1e6).toFixed(1)}MB`,
+      });
+    },
+  );
 
-  onProgress?.({ phase: 'load', progress: 0.32, detail: 'onnx session' });
-  const processor = new DemucsProcessor({
-    ort,
+  let bass: Uint8Array | null = null;
+  if (wantBass) {
+    onProgress?.({ phase: 'download', progress: 0.22, detail: 'bass.onnx' });
+    bass = await ensureModel(
+      'umx_hq_bass.onnx',
+      process.env.CHORD_AI_UMX_BASS_URL || UMX_BASS_URL,
+      (loaded, total) => {
+        onProgress?.({
+          phase: 'download',
+          progress: 0.22 + (total ? (loaded / total) * 0.2 : 0.1),
+          detail: `bass ${(loaded / 1e6).toFixed(1)}MB`,
+        });
+      },
+    );
+  }
+
+  return separateWithUmx(samples, sampleRate, {
+    ort: ort as unknown as import('../src/umx.js').OrtLike,
+    vocalsModel: vocals,
+    bassModel: bass,
     sessionOptions: {
       executionProviders: ['cpu'],
       graphOptimizationLevel: 'basic',
       enableCpuMemArena: false,
       enableMemPattern: false,
     },
-    onProgress: ({ progress }) => {
-      onProgress?.({
-        phase: 'infer',
-        progress: 0.35 + progress * 0.6,
-        detail: 'segments',
-      });
-    },
-    onLog: (phase, msg) => console.log(`[demucs:${phase}] ${msg}`),
+    onProgress,
   });
-  await processor.loadModel(model);
-
-  // Resample to 44.1 kHz stereo (duplicate mono)
-  let left = samples;
-  if (sampleRate !== DEMUCS_SAMPLE_RATE) {
-    left = resampleLinear(samples, sampleRate, DEMUCS_SAMPLE_RATE);
-  }
-  const right = left;
-
-  onProgress?.({ phase: 'infer', progress: 0.4, detail: 'separate' });
-  const result = await processor.separate(left, right);
-  onProgress?.({ phase: 'done', progress: 1 });
-
-  return {
-    drums: result.drums,
-    bass: result.bass,
-    other: result.other,
-    vocals: result.vocals,
-    sampleRate: CONSTANTS.SAMPLE_RATE,
-  };
 }

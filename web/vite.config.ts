@@ -1,9 +1,44 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
+import { writeFileSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs';
+
+/** Drop ORT wasm from the bundle and write .assetsignore for Cloudflare Workers. */
+function stripOrtWasmAssets(): Plugin {
+  return {
+    name: 'strip-ort-wasm-assets',
+    generateBundle(_opts, bundle) {
+      for (const key of Object.keys(bundle)) {
+        if (key.endsWith('.wasm')) {
+          delete bundle[key];
+        }
+      }
+    },
+    closeBundle() {
+      const dist = path.resolve(__dirname, 'dist');
+      writeFileSync(
+        path.join(dist, '.assetsignore'),
+        `# ORT wasm is served from CDN (see separateWorker.ts)
+*.wasm
+**/*.wasm
+`,
+      );
+      stripWasmDir(dist);
+    },
+  };
+}
+
+function stripWasmDir(dir: string) {
+  if (!existsSync(dir)) return;
+  for (const name of readdirSync(dir)) {
+    const p = path.join(dir, name);
+    if (statSync(p).isDirectory()) stripWasmDir(p);
+    else if (name.endsWith('.wasm')) unlinkSync(p);
+  }
+}
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), stripOrtWasmAssets()],
   resolve: {
     alias: {
       '@chord-ai/engine': path.resolve(__dirname, '../packages/chord-engine/src/index.ts'),
@@ -13,7 +48,8 @@ export default defineConfig({
     port: 5173,
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
+      // credentialless lets CDN ORT wasm load under COOP without CORP on every host
+      'Cross-Origin-Embedder-Policy': 'credentialless',
     },
     proxy: {
       '/api': {
@@ -26,8 +62,10 @@ export default defineConfig({
     format: 'es',
   },
   optimizeDeps: {
-    exclude: ['@chord-ai/engine'],
+    exclude: ['@chord-ai/engine', 'onnxruntime-web'],
   },
-  // onnxruntime-web wasm assets
-  assetsInclude: ['**/*.wasm'],
+  build: {
+    // Do not emit wasm as hashed assets; runtime loads from jsDelivr.
+    assetsInlineLimit: 0,
+  },
 });

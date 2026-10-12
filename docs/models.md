@@ -1,33 +1,48 @@
 # Model licenses (source separation)
 
-Chord AI’s core chord detector is original MIT code (no ML weights). Optional **source separation** improves real-recording accuracy by removing vocals/drums before chroma matching and using the bass stem for root emphasis.
+Chord AI’s core chord detector is original MIT code (no ML weights). Optional **source separation** (UI: **進階模式**, default **off**) improves real-recording accuracy by removing vocals before chroma matching and using a bass stem for root emphasis.
 
-## HTDemucs (default separator)
+## UMX-HQ (advanced-mode separator)
 
 | Item | Detail |
 |---|---|
-| Architecture | Hybrid Transformer Demucs (`htdemucs`) — Meta / facebookresearch/demucs |
-| ONNX package | [`demucs-web`](https://github.com/timcsy/demucs-web) (MIT) |
-| Runtime | [`onnxruntime-web`](https://onnxruntime.ai/) (MIT) · WebGPU with WASM fallback |
-| Weights URL (lazy) | `https://huggingface.co/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx` (~172 MB) |
-| Upstream license | Demucs code **and** released pretrained models: **MIT** ([facebookresearch/demucs](https://github.com/facebookresearch/demucs/blob/main/LICENSE), HF `adefossez/HTDemucs-ft` `license: mit`) |
-| Stems | `drums`, `bass`, `other`, `vocals` |
+| Architecture | Open-Unmix **UMX-HQ** (half-width LSTM vs UMX-L) — [sigsep/open-unmix-pytorch](https://github.com/sigsep/open-unmix-pytorch) |
+| ONNX | Spectrogram nets only; host STFT/iSTFT in `@chord-ai/engine` (`n_fft=4096`, `hop=1024`, periodic Hann) |
+| Runtime | [`onnxruntime-web`](https://onnxruntime.ai/) / `onnxruntime-node` (MIT) · WebGPU with WASM fallback |
+| Weights (lazy) | Vocals `edgetools/umx-hq` `vocals.onnx` (~17 MiB) + bass from export commit `2cc0d6a` (~17 MiB) → **~34 MiB total** |
+| Upstream license | **MIT** (Zenodo 3370489 / open-unmix-pytorch). UMX-L weights are **CC BY-NC-SA 4.0** — not used. |
+| Stems used | `vocals`, `bass`; `other` ≈ residual; `drums` empty |
 
-**Redistribution:** weights are **not** vendored in this git repo. Clients download on first use (browser Cache Storage / Node `CHORD_AI_MODEL_DIR`). For production you may mirror the same ONNX on Cloudflare R2 and set `VITE_DEMUCS_MODEL_URL`.
+**Redistribution:** weights are **not** vendored in git. Clients download on first advanced-mode use (`CHORD_AI_MODEL_DIR` in Node). Mirror on R2 with `VITE_UMX_VOCALS_URL` / `VITE_UMX_BASS_URL`.
+
+**ORT wasm:** loaded from jsDelivr CDN (`ort.env.wasm.wasmPaths`); `*.wasm` is listed in `web/dist/.assetsignore` so Cloudflare Workers’ 25 MiB asset limit is not breached (the jsep build alone is ~28 MiB).
+
+**Client persistence:** a single long-lived `separateWorker` keeps warm ONNX sessions in memory. Model ONNX + ORT wasm/mjs bytes are also stored in **Cache Storage** (`chord-ai-ml-v1`, keyed by absolute URL). Reloads and later analyses load `ArrayBuffer` from cache before any network fetch; the UI shows 已快取 / 尚未下載 and offers **清除模型快取**.
 
 **Chord pipeline use:**
 
-- Chroma / templates ← `bass + other + light drums` (vocals excluded)
+- Chroma / templates ← `bass + other` (vocals excluded)
 - Bass chroma / root prior ← `bass` stem
+
+## Accuracy vs size
+
+| Option | Size | Role |
+|---|---:|---|
+| Off (default) | 0 | Full-mix chroma — fast path |
+| UMX-HQ vocals+bass | ~34 MiB | Current advanced mode |
+| HTDemucs ONNX (removed) | ~172 MiB | Higher quality, too large for frontend default |
+
+See measured before/after numbers in [`docs/validation.md`](./validation.md).
 
 ## Alternatives considered
 
 | Model | Why not default |
 |---|---|
-| Open-Unmix **UMX-HQ** (MIT, Zenodo) | Smaller vocals ONNX (~36 MB) available; needs custom STFT/Wiener host code and separate bass ONNX for 4-stem parity |
-| Open-Unmix **UMX-L** | Weights **CC BY-NC-SA 4.0** — not suitable for unrestricted MIT redistribution |
-| UVR MDX-Net Voc_FT | Strong vocal remover (~65 MB, MIT claimed) but only 2-stem (no dedicated bass) |
+| HTDemucs (`demucs-web`) | ~172 MiB ONNX; also pulled ORT jsep wasm (~28 MiB) into Pages assets |
+| Open-Unmix **UMX-L** | Weights **CC BY-NC-SA 4.0** |
+| MixDirective UMX-HQ single-stem ONNX | ~35 MiB **per** stem — vocals+bass would exceed 40 MiB |
+| UVR MDX-Net Voc_FT | ~65 MiB; 2-stem only (no dedicated bass) |
 
 ## Privacy
 
-Separation and chord analysis run **entirely in the browser (or local Node harness)**. Audio is never uploaded. Only the static ONNX weight file is fetched from the model host / R2.
+Separation and chord analysis run **entirely in the browser (or local Node harness)**. Audio is never uploaded. Only static ONNX weights (and ORT wasm from the CDN) are fetched.

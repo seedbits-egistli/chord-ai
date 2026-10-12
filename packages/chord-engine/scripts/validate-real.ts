@@ -2,9 +2,10 @@
  * Validate against user-supplied recordings (local only).
  * MP3s must NOT be committed — pass CHORD_AI_TEST_AUDIO dir.
  *
- * Optional Demucs separation before/after comparison:
- *   CHORD_AI_SEPARATE=1 (default when model can download)
- *   CHORD_AI_SEP_MAX_SEC=90  — only first N seconds for Demucs (CPU cost)
+ * Optional UMX-HQ separation before/after comparison (opt-in advanced mode):
+ *   CHORD_AI_SEPARATE=1 (default on in this harness; set 0 to skip)
+ *   CHORD_AI_SEP_MAX_SEC=60  — only first N seconds for separation (CPU cost)
+ *   CHORD_AI_UMX_BASS=0      — vocals-only (~17 MiB) instead of vocals+bass (~34 MiB)
  */
 import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -23,7 +24,7 @@ const root = join(__dirname, '../../..');
 
 const audioDir = process.env.CHORD_AI_TEST_AUDIO ?? '/tmp/chord-ai-test-audio';
 const wantSeparate = process.env.CHORD_AI_SEPARATE !== '0';
-const sepMaxSec = Number(process.env.CHORD_AI_SEP_MAX_SEC || 90);
+const sepMaxSec = Number(process.env.CHORD_AI_SEP_MAX_SEC || 60);
 
 interface Row {
   kind: 'synth' | 'real' | 'real-sep';
@@ -132,7 +133,7 @@ async function main() {
       );
 
       if (wantSeparate) {
-        console.log(`  Separating first ${sepMaxSec}s with HTDemucs (CPU)…`);
+        console.log(`  Separating first ${sepMaxSec}s with UMX-HQ (CPU)…`);
         const maxSamples = Math.floor(sepMaxSec * sampleRate);
         const clip = samples.subarray(0, Math.min(samples.length, maxSamples));
         try {
@@ -167,7 +168,7 @@ async function main() {
           });
           const sepRow: Row = {
             kind: 'real-sep',
-            title: `${ref.title} (+HTDemucs)`,
+            title: `${ref.title} (+UMX-HQ)`,
             artist: ref.artist,
             exactPct: round1(sepScore.exactPct),
             majMinPct: round1(sepScore.majMinPct),
@@ -175,11 +176,11 @@ async function main() {
             refKey: ref.key,
             beats: sepScore.beats,
             offsetMs: sepScore.offsetMs,
-            note: `HTDemucs instrumental+bass on first ${sepMaxSec}s only. Compare to baseline first${sepMaxSec}s above.`,
+            note: `UMX-HQ vocals+bass (~34MiB) on first ${sepMaxSec}s only. Compare to baseline first${sepMaxSec}s above.`,
           };
           rows.push(sepRow);
           console.log(
-            `${ref.title} +Demucs (first ${sepMaxSec}s): exact ${sepRow.exactPct}% maj/min ${sepRow.majMinPct}% key ${sepResult.key}`,
+            `${ref.title} +UMX-HQ (first ${sepMaxSec}s): exact ${sepRow.exactPct}% maj/min ${sepRow.majMinPct}% key ${sepResult.key}`,
           );
           console.log(
             '  detected:',
@@ -192,7 +193,7 @@ async function main() {
           console.warn('  Separation failed:', e);
           rows.push({
             kind: 'real-sep',
-            title: `${ref.title} (+HTDemucs)`,
+            title: `${ref.title} (+UMX-HQ)`,
             artist: ref.artist,
             exactPct: NaN,
             majMinPct: NaN,
@@ -234,14 +235,14 @@ function writeDocs(rows: Row[]) {
     '2. **Synthesized audio**: additive guitar-like tones at fixture BPM (`synthesizeChordProgression`).',
     '3. **Real audio (local only)**: `hey_jude.mp3` / `wonderwall.mp3` via `CHORD_AI_TEST_AUDIO` + ffmpeg. **Never committed.**',
     '4. **Wonderwall** scored in **sounding key** (capo 2 → F#m7–A–Esus4–B7sus4).',
-    '5. Optional **HTDemucs** source separation (MIT weights, lazy ONNX download) → instrumental chroma + bass stem. See [`docs/models.md`](./models.md).',
+    '5. Optional **UMX-HQ** source separation (MIT, ~34 MiB vocals+bass ONNX, lazy download; **opt-in advanced mode**, default off in the UI) → instrumental chroma + bass stem. See [`docs/models.md`](./models.md).',
     '6. Beat-level metrics with lag / loop-phase search:',
     '   - **Exact**: root + quality family (maj≈maj7, min≈min7, sus≈7sus4).',
     '   - **Maj/min**: root + major/minor class only.',
     '',
     '```bash',
     'npm run validate -w @chord-ai/engine',
-    'CHORD_AI_TEST_AUDIO=/path/to/mp3s CHORD_AI_SEPARATE=1 CHORD_AI_SEP_MAX_SEC=90 \\',
+    'CHORD_AI_TEST_AUDIO=/path/to/mp3s CHORD_AI_SEPARATE=1 CHORD_AI_SEP_MAX_SEC=60 \\',
     '  npm run validate:real -w @chord-ai/engine',
     '```',
     '',
@@ -282,21 +283,21 @@ function writeDocs(rows: Row[]) {
     );
   }
 
-  lines.push('## Before / after HTDemucs (first N seconds)', '');
+  lines.push('## Before / after UMX-HQ (first N seconds)', '');
   if (sep.length === 0) {
     lines.push(
-      '_Separation not run. Set `CHORD_AI_SEPARATE=1` (and allow ~172MB model download)._',
+      '_Separation not run. Set `CHORD_AI_SEPARATE=1` (and allow ~34 MiB UMX-HQ download)._',
       '',
     );
   } else {
     lines.push(
-      `Compared on the **first ${sepMaxSec}s** of each file (Demucs on CPU in the harness; browser uses WebGPU when available).`,
+      `Compared on the **first ${sepMaxSec}s** of each file (UMX-HQ on CPU in the harness; browser uses WebGPU when available).`,
       '',
-      '| Song | Baseline exact % | Baseline maj/min % | +HTDemucs exact % | +HTDemucs maj/min % | Δ maj/min |',
+      '| Song | Baseline exact % | Baseline maj/min % | +UMX-HQ exact % | +UMX-HQ maj/min % | Δ maj/min |',
       '|---|---:|---:|---:|---:|---:|',
     );
     for (const r of sep) {
-      const baseTitle = r.title.replace(' (+HTDemucs)', '');
+      const baseTitle = r.title.replace(' (+UMX-HQ)', '');
       const base = real.find((x) => x.title === baseTitle);
       // Parse firstNs maj/min from note: "first60s exact X% maj/min Y%"
       let baseExact = NaN;
@@ -318,7 +319,15 @@ function writeDocs(rows: Row[]) {
     }
     lines.push(
       '',
-      'Hey Jude improves sharply once vocals/orchestra bleed are removed. Wonderwall’s capo-2 open-string drone remains in the `other`/`bass` stems, so bar-level alignment vs equal 4-bar UG loops stays hard even after vocal removal (vocabulary A/F#m/E/B is still correct).',
+      '### Accuracy vs size',
+      '',
+      '| Separator | Download | License | Notes |',
+      '|---|---:|---|---|',
+      '| Full mix (no sep) | 0 | — | Default path everywhere |',
+      '| **UMX-HQ vocals+bass** (current) | **~34 MiB** | MIT | Opt-in advanced mode |',
+      '| HTDemucs (previous) | ~172 MiB | MIT | Stronger vocal/drum removal; too heavy for frontend default |',
+      '',
+      'Hey Jude usually improves once vocals are attenuated. Wonderwall’s capo-2 open-string drone remains in the residual/`bass` stems, so bar-level alignment vs equal 4-bar UG loops stays hard even after vocal removal (vocabulary A/F#m/E/B is still correct). UMX-HQ trades some separation quality vs HTDemucs for a ~5× smaller download.',
       '',
     );
   }
@@ -327,7 +336,7 @@ function writeDocs(rows: Row[]) {
     '## Limitations',
     '',
     '- Non-ML template matching on commercial mixes trails ML; editor + simplify remain essential.',
-    '- HTDemucs adds a large download and heavy CPU/GPU work; default-off on mobile.',
+    '- UMX-HQ is opt-in advanced mode (default off): ~34 MiB download + CPU/GPU work.',
     '- Separation validation uses a time-capped clip so the harness finishes in CI-like environments.',
     '- **No commercial recordings are in git.**',
     '',

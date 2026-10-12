@@ -7,7 +7,16 @@ import {
   type ChordEvent,
   type DetectionResult,
 } from '@chord-ai/engine';
-import { analyzeAudio, decodeFile, recordMicrophone } from '../lib/audio';
+import {
+  analyzeAudio,
+  clearModelCache,
+  decodeFile,
+  getModelCacheStatus,
+  prefetchModels,
+  recordMicrophone,
+  type ModelCacheStatus,
+  type SeparateSources,
+} from '../lib/audio';
 import { defaultSeparationEnabled } from '../lib/capabilities';
 import { publishSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
@@ -40,6 +49,18 @@ export function HomePage() {
   const [separate, setSeparate] = useState(false);
   const [sepHint, setSepHint] = useState('偵測裝置能力中…');
   const [webgpu, setWebgpu] = useState(false);
+  const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
+  const [lastSources, setLastSources] = useState<SeparateSources | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
+
+  async function refreshCacheStatus() {
+    try {
+      const s = await getModelCacheStatus({ useBass: true });
+      setCacheStatus(s);
+    } catch {
+      /* worker may still be booting */
+    }
+  }
 
   useEffect(() => {
     void defaultSeparationEnabled().then((c) => {
@@ -47,7 +68,13 @@ export function HomePage() {
       setWebgpu(c.webgpu);
       setSepHint(c.reason);
     });
+    void refreshCacheStatus();
   }, []);
+
+  useEffect(() => {
+    if (!separate) return;
+    void refreshCacheStatus();
+  }, [separate]);
 
   const view = useMemo(() => {
     if (!raw) return null;
@@ -76,7 +103,7 @@ export function HomePage() {
     setProgress(5);
     setStatus(
       separate
-        ? '音源分離（HTDemucs，音訊不離開此裝置）…'
+        ? '進階模式：UMX-HQ 音源分離（音訊不離開此裝置）…'
         : '正在分析和弦（瀏覽器內處理）…',
     );
     try {
@@ -96,9 +123,19 @@ export function HomePage() {
       setRaw(result);
       setTranspose(0);
       setSelected(0);
+      if (result.separateSources) setLastSources(result.separateSources);
+      void refreshCacheStatus();
+      const srcNote =
+        result.separateSources &&
+        result.separateSources.vocals !== 'network' &&
+        result.separateSources.bass !== 'network'
+          ? '；模型來自本機快取'
+          : result.separateSources
+            ? '；模型已寫入本機快取'
+            : '';
       setStatus(
         `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
-          (result.usedSeparation ? '（已做人聲／鼓分離）' : '。'),
+          (result.usedSeparation ? `（已做人聲分離${srcNote}）` : '。'),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -273,16 +310,79 @@ export function HomePage() {
             <input
               type="checkbox"
               checked={separate}
-              disabled={busy}
-              onChange={(e) => setSeparate(e.target.checked)}
+              disabled={busy || cacheBusy}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setSeparate(on);
+                if (on) {
+                  setCacheBusy(true);
+                  void prefetchModels({
+                    preferWebGpu: webgpu,
+                    useBass: true,
+                    onProgress: (p, detail) => {
+                      setProgress(Math.round(p * 100));
+                      setStatus(detail);
+                    },
+                  })
+                    .then(() => refreshCacheStatus())
+                    .catch((err) =>
+                      setError(err instanceof Error ? err.message : String(err)),
+                    )
+                    .finally(() => setCacheBusy(false));
+                }
+              }}
               style={{ marginTop: '0.2rem' }}
             />
             <span>
-              <strong style={{ color: 'var(--ink)' }}>音源分離（HTDemucs）</strong>
-              — 先去掉人聲／鼓再辨識和弦，並用貝斯軌強化根音。首次需下載約 172MB
-              模型（可改託管於 R2）。{sepHint}
+              <strong style={{ color: 'var(--ink)' }}>進階模式：音源分離（UMX-HQ）</strong>
+              — 預設關閉。開啟後先去掉人聲再辨識和弦，並用貝斯軌強化根音。首次需下載約
+              34MB（之後存於本機 Cache Storage，可改託管於 R2）。{sepHint}
             </span>
           </label>
+          <div
+            style={{
+              marginTop: '0.65rem',
+              maxWidth: '36rem',
+              fontSize: '0.85rem',
+              color: 'var(--ink-soft)',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.5rem',
+              alignItems: 'center',
+            }}
+          >
+            <span data-testid="model-cache-status">
+              模型快取：
+              {cacheStatus == null
+                ? '檢查中…'
+                : cacheStatus.allCached
+                  ? `已快取（${(cacheStatus.totalBytes / 1e6).toFixed(1)} MB）`
+                  : '尚未下載／部分缺失'}
+              {lastSources
+                ? ` · 上次：vocals=${lastSources.vocals}, bass=${lastSources.bass}, ort=${lastSources.ort}`
+                : ''}
+            </span>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
+              disabled={busy || cacheBusy}
+              data-testid="clear-model-cache"
+              onClick={() => {
+                setCacheBusy(true);
+                void clearModelCache()
+                  .then(() => {
+                    setLastSources(null);
+                    setStatus('已清除模型快取（含 ORT wasm）');
+                    return refreshCacheStatus();
+                  })
+                  .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                  .finally(() => setCacheBusy(false));
+              }}
+            >
+              清除模型快取
+            </button>
+          </div>
         </div>
         <div className="hero-visual" aria-hidden>
           <div className="wave" />

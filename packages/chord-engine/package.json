@@ -30,7 +30,6 @@
     "vitest": "^3.0.9"
   },
   "dependencies": {
-    "demucs-web": "^1.0.2",
     "onnxruntime-node": "^1.30.0"
   }
 }

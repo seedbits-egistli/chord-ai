@@ -1,4 +1,4 @@
-/** Device / backend hints for optional Demucs separation. */
+/** Device hints for optional advanced-mode UMX separation (always default-off). */
 
 export function isMobileUa(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -19,8 +19,8 @@ export async function hasWebGpu(): Promise<boolean> {
 }
 
 /**
- * Default: ON for desktop with WebGPU; OFF on mobile / no WebGPU.
- * User can still toggle in the UI.
+ * Separation is an opt-in advanced mode — always default OFF.
+ * Hint text still reflects device capability (WebGPU vs WASM).
  */
 export async function defaultSeparationEnabled(): Promise<{
   enabled: boolean;
@@ -35,21 +35,21 @@ export async function defaultSeparationEnabled(): Promise<{
       enabled: false,
       webgpu,
       mobile,
-      reason: '行動裝置預設關閉（模型約 172MB，建議桌面 WebGPU）',
+      reason: '進階模式預設關閉；行動裝置上 WASM 分離會較慢（模型約 34MB）',
     };
   }
   if (webgpu) {
     return {
-      enabled: true,
+      enabled: false,
       webgpu,
       mobile,
-      reason: '偵測到 WebGPU，預設啟用 HTDemucs 分離',
+      reason: '進階模式預設關閉；此裝置有 WebGPU，可手動開啟 UMX-HQ 分離（約 34MB）',
     };
   }
   return {
     enabled: false,
     webgpu,
     mobile,
-    reason: '無 WebGPU：預設關閉（仍可手動開啟，將使用較慢的 WASM）',
+    reason: '進階模式預設關閉；無 WebGPU 時將使用較慢的 WASM（約 34MB）',
   };
 }

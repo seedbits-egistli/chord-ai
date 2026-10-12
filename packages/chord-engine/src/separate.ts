@@ -1,9 +1,8 @@
 /**
  * Source-separation helpers for chord detection.
  *
- * Model integration (Demucs HTDemucs ONNX via demucs-web) lives in the
- * browser Worker / Node validation harness. This module only mixes stems
- * and feeds them into the detector.
+ * Model runtime (UMX-HQ ONNX) lives in `umx.ts` / Workers / Node harness.
+ * This module mixes stems and feeds them into the detector.
  */
 
 import { detectChords } from './detect.js';
@@ -29,9 +28,9 @@ export interface SeparateProgress {
   detail?: string;
 }
 
-/** Default public model URL (lazy-loaded, not committed). */
+/** @deprecated Use UMX_VOCALS_URL — kept for older env var docs. */
 export const DEMUCS_MODEL_URL =
-  'https://huggingface.co/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx';
+  'https://huggingface.co/edgetools/umx-hq/resolve/main/vocals.onnx';
 
 export const DEMUCS_SAMPLE_RATE = 44100;
 
@@ -93,7 +92,7 @@ export function resampleLinear(
 }
 
 /**
- * Detect chords from Demucs stems: chroma on instrumental, bass chroma from bass stem.
+ * Detect chords from separated stems: chroma on instrumental, bass chroma from bass stem.
  */
 export function detectChordsFromStems(
   stems: SeparationStems,
@@ -104,7 +103,7 @@ export function detectChordsFromStems(
   return detectChords(instrumental, stems.sampleRate, {
     ...options,
     bassSamples: bass,
-    // After vocal/drum removal, less drone suppression needed
+    // After vocal removal, less drone suppression needed
     suppressDrone: options.suppressDrone ?? false,
   });
 }
