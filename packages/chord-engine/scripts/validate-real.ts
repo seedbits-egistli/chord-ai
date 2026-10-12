@@ -33,6 +33,11 @@ interface Row {
   kind: 'synth' | 'real' | 'real-sep' | 'real-precise';
   title: string;
   artist: string;
+  /** Headline: mean weighted PC tone-overlap (0–100). */
+  toneOverlapPct: number;
+  toneJaccardPct: number;
+  toneRecallPct: number;
+  rootMatchPct: number;
   exactPct: number;
   majMinPct: number;
   detectedKey: string;
@@ -40,6 +45,39 @@ interface Row {
   beats: number;
   offsetMs: number;
   note: string;
+}
+
+function toneFields(score: {
+  toneOverlapPct: number;
+  toneJaccardPct: number;
+  toneRecallPct: number;
+  rootMatchPct: number;
+  exactPct: number;
+  majMinPct: number;
+  beats: number;
+  offsetMs: number;
+}) {
+  return {
+    toneOverlapPct: round1(score.toneOverlapPct),
+    toneJaccardPct: round1(score.toneJaccardPct),
+    toneRecallPct: round1(score.toneRecallPct),
+    rootMatchPct: round1(score.rootMatchPct),
+    exactPct: round1(score.exactPct),
+    majMinPct: round1(score.majMinPct),
+    beats: score.beats,
+    offsetMs: score.offsetMs,
+  };
+}
+
+function nanToneFields() {
+  return {
+    toneOverlapPct: NaN,
+    toneJaccardPct: NaN,
+    toneRecallPct: NaN,
+    rootMatchPct: NaN,
+    exactPct: NaN,
+    majMinPct: NaN,
+  };
 }
 
 async function main() {
@@ -61,16 +99,14 @@ async function main() {
       kind: 'synth',
       title: fixture.title,
       artist: fixture.artist,
-      exactPct: round1(score.exactPct),
-      majMinPct: round1(score.majMinPct),
+      ...toneFields(score),
       detectedKey: result.key,
       refKey: fixture.key,
-      beats: score.beats,
-      offsetMs: 0,
       note: 'synthesized from reference chart',
     });
+    const last = rows.at(-1)!;
     console.log(
-      `${fixture.title}: exact ${rows.at(-1)!.exactPct}% maj/min ${rows.at(-1)!.majMinPct}%`,
+      `${fixture.title}: tone ${last.toneOverlapPct}% (J=${last.toneJaccardPct} R=${last.toneRecallPct} root=${last.rootMatchPct}) | exact ${last.exactPct}% maj/min ${last.majMinPct}%`,
     );
   }
 
@@ -105,7 +141,7 @@ async function main() {
           maxOffsetMs: 8000,
           durationMs: fullDur,
         });
-        return s.majMinPct;
+        return s.toneOverlapPct;
       });
       const score = scoreAgainstTimedReference(result.chords, aligned, {
         bpm: ref.bpm,
@@ -121,18 +157,15 @@ async function main() {
         kind: 'real',
         title: ref.title,
         artist: ref.artist,
-        exactPct: round1(score.exactPct),
-        majMinPct: round1(score.majMinPct),
+        ...toneFields(score),
         detectedKey: result.key,
         refKey: ref.key,
-        beats: score.beats,
-        offsetMs: score.offsetMs,
-        note: `${ref.source} | first${sepMaxSec}s exact ${round1(headScore.exactPct)}% maj/min ${round1(headScore.majMinPct)}%`,
+        note: `${ref.source} | first${sepMaxSec}s tone ${round1(headScore.toneOverlapPct)}% (J=${round1(headScore.toneJaccardPct)} R=${round1(headScore.toneRecallPct)} root=${round1(headScore.rootMatchPct)}) exact ${round1(headScore.exactPct)}% maj/min ${round1(headScore.majMinPct)}%`,
       };
       rows.push(row);
       realBaseline.push(row);
       console.log(
-        `${ref.title} baseline: exact ${row.exactPct}% maj/min ${row.majMinPct}% | first${sepMaxSec}s ${round1(headScore.exactPct)}/${round1(headScore.majMinPct)} | key ${result.key}`,
+        `${ref.title} baseline: tone ${row.toneOverlapPct}% | exact ${row.exactPct}% maj/min ${row.majMinPct}% | first${sepMaxSec}s tone ${round1(headScore.toneOverlapPct)}% exact ${round1(headScore.exactPct)}/${round1(headScore.majMinPct)} | key ${result.key}`,
       );
 
       if (wantSeparate) {
@@ -162,7 +195,7 @@ async function main() {
               maxOffsetMs: 8000,
               durationMs: sepMaxSec * 1000,
             });
-            return s.majMinPct;
+            return s.toneOverlapPct;
           });
           const sepScore = scoreAgainstTimedReference(sepResult.chords, headAligned, {
             bpm: ref.bpm,
@@ -173,17 +206,14 @@ async function main() {
             kind: 'real-sep',
             title: `${ref.title} (+UMX-HQ)`,
             artist: ref.artist,
-            exactPct: round1(sepScore.exactPct),
-            majMinPct: round1(sepScore.majMinPct),
+            ...toneFields(sepScore),
             detectedKey: sepResult.key,
             refKey: ref.key,
-            beats: sepScore.beats,
-            offsetMs: sepScore.offsetMs,
             note: `UMX-HQ vocals+bass (~34MiB) on first ${sepMaxSec}s only. Compare to baseline first${sepMaxSec}s above.`,
           };
           rows.push(sepRow);
           console.log(
-            `${ref.title} +UMX-HQ (first ${sepMaxSec}s): exact ${sepRow.exactPct}% maj/min ${sepRow.majMinPct}% key ${sepResult.key}`,
+            `${ref.title} +UMX-HQ (first ${sepMaxSec}s): tone ${sepRow.toneOverlapPct}% exact ${sepRow.exactPct}% maj/min ${sepRow.majMinPct}% key ${sepResult.key}`,
           );
           console.log(
             '  detected:',
@@ -227,7 +257,7 @@ async function main() {
                   maxOffsetMs: 8000,
                   durationMs: sepMaxSec * 1000,
                 });
-                return s.majMinPct;
+                return s.toneOverlapPct;
               });
               const precScore = scoreAgainstTimedReference(
                 preciseResult.chords,
@@ -242,17 +272,14 @@ async function main() {
                 kind: 'real-precise',
                 title: `${ref.title} (+precise)`,
                 artist: ref.artist,
-                exactPct: round1(precScore.exactPct),
-                majMinPct: round1(precScore.majMinPct),
+                ...toneFields(precScore),
                 detectedKey: preciseResult.key,
                 refKey: ref.key,
-                beats: precScore.beats,
-                offsetMs: precScore.offsetMs,
                 note: `精準模式 UMX+Basic Pitch on first ${sepMaxSec}s; notes other=${otherNotes.length} bass=${bassNotes.length}`,
               };
               rows.push(precRow);
               console.log(
-                `${ref.title} +precise (first ${sepMaxSec}s): exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key}`,
+                `${ref.title} +precise (first ${sepMaxSec}s): tone ${precRow.toneOverlapPct}% (J=${precRow.toneJaccardPct} R=${precRow.toneRecallPct} root=${precRow.rootMatchPct}) exact ${precRow.exactPct}% maj/min ${precRow.majMinPct}% key ${preciseResult.key}`,
               );
               console.log(
                 '  detected:',
@@ -267,8 +294,7 @@ async function main() {
                 kind: 'real-precise',
                 title: `${ref.title} (+precise)`,
                 artist: ref.artist,
-                exactPct: NaN,
-                majMinPct: NaN,
+                ...nanToneFields(),
                 detectedKey: '—',
                 refKey: ref.key,
                 beats: 0,
@@ -283,8 +309,7 @@ async function main() {
             kind: 'real-sep',
             title: `${ref.title} (+UMX-HQ)`,
             artist: ref.artist,
-            exactPct: NaN,
-            majMinPct: NaN,
+            ...nanToneFields(),
             detectedKey: '—',
             refKey: ref.key,
             beats: 0,
@@ -308,7 +333,14 @@ function writeDocs(rows: Row[]) {
   const real = rows.filter((r) => r.kind === 'real');
   const sep = rows.filter((r) => r.kind === 'real-sep');
   const precise = rows.filter((r) => r.kind === 'real-precise');
-  const avg = (xs: Row[], k: 'exactPct' | 'majMinPct') => {
+  type MetricKey =
+    | 'toneOverlapPct'
+    | 'toneJaccardPct'
+    | 'toneRecallPct'
+    | 'rootMatchPct'
+    | 'exactPct'
+    | 'majMinPct';
+  const avg = (xs: Row[], k: MetricKey) => {
     const ok = xs.filter((r) => Number.isFinite(r[k]));
     return ok.length ? ok.reduce((s, r) => s + r[k], 0) / ok.length : 0;
   };
@@ -326,9 +358,11 @@ function writeDocs(rows: Row[]) {
     '4. **Wonderwall** scored in **sounding key** (capo 2 → F#m7–A–Esus4–B7sus4).',
     '5. **快速模式**: full-mix chroma templates (no ML download).',
     '6. **精準模式** (UI opt-in): UMX-HQ separation → Basic Pitch (Apache-2.0, ~226 KiB ONNX) on `other`/`bass` → note-based chords (duration×velocity PC histogram, bass root/slash, drone suppress, key-aware Viterbi). No staff generation. See [`docs/models.md`](./models.md).',
-    '7. Beat-level metrics with lag / loop-phase search:',
-    '   - **Exact**: root + quality family (maj≈maj7, min≈min7, sus≈7sus4).',
-    '   - **Maj/min**: root + major/minor class only.',
+    '7. Beat-level metrics with lag / loop-phase search. **Headline metric is tone overlap** (shared pitch classes), not chord-name equality:',
+    '   - **Tone overlap %** (primary): mean of `0.55·Jaccard + 0.35·recall + 0.10·rootMatch` per beat, where Jaccard = `|A∩B|/|A∪B|` and recall = `|A∩B|/|A|` over reference/hypothesis pitch-class sets.',
+    '   - **Jaccard / Recall / Root**: component columns (root match reported separately).',
+    '   - **Exact** (secondary): root + quality family (maj≈maj7, min≈min7, sus≈7sus4).',
+    '   - **Maj/min** (secondary): root + major/minor class only.',
     '',
     '```bash',
     'npm run validate -w @chord-ai/engine',
@@ -338,16 +372,16 @@ function writeDocs(rows: Row[]) {
     '',
     '## Synthesized results',
     '',
-    '| Song | Artist | Ref key | Exact % | Maj/min % | Detected key |',
-    '|---|---|---|---:|---:|---|',
+    '| Song | Artist | Ref key | **Tone %** | Jaccard % | Recall % | Root % | Exact % | Maj/min % | Detected key |',
+    '|---|---|---|---:|---:|---:|---:|---:|---:|---|',
   ];
   for (const r of synth) {
     lines.push(
-      `| ${r.title} | ${r.artist} | ${r.refKey} | ${r.exactPct.toFixed(1)} | ${r.majMinPct.toFixed(1)} | ${r.detectedKey} |`,
+      `| ${r.title} | ${r.artist} | ${r.refKey} | **${r.toneOverlapPct.toFixed(1)}** | ${r.toneJaccardPct.toFixed(1)} | ${r.toneRecallPct.toFixed(1)} | ${r.rootMatchPct.toFixed(1)} | ${r.exactPct.toFixed(1)} | ${r.majMinPct.toFixed(1)} | ${r.detectedKey} |`,
     );
   }
   lines.push(
-    `| **Average** | | | **${avg(synth, 'exactPct').toFixed(1)}** | **${avg(synth, 'majMinPct').toFixed(1)}** | |`,
+    `| **Average** | | | **${avg(synth, 'toneOverlapPct').toFixed(1)}** | ${avg(synth, 'toneJaccardPct').toFixed(1)} | ${avg(synth, 'toneRecallPct').toFixed(1)} | ${avg(synth, 'rootMatchPct').toFixed(1)} | ${avg(synth, 'exactPct').toFixed(1)} | ${avg(synth, 'majMinPct').toFixed(1)} | |`,
     '',
     '## Real recording results (local files, not in repo)',
     '',
@@ -359,16 +393,16 @@ function writeDocs(rows: Row[]) {
     );
   } else {
     lines.push(
-      '| Song | Artist | Ref key | Exact % | Maj/min % | Detected key | Notes |',
-      '|---|---|---|---:|---:|---|---|',
+      '| Song | Artist | Ref key | **Tone %** | Jaccard % | Recall % | Root % | Exact % | Maj/min % | Detected key | Notes |',
+      '|---|---|---|---:|---:|---:|---:|---:|---:|---|---|',
     );
     for (const r of real) {
       lines.push(
-        `| ${r.title} | ${r.artist} | ${r.refKey} | ${fmt(r.exactPct)} | ${fmt(r.majMinPct)} | ${r.detectedKey} | ${r.note} |`,
+        `| ${r.title} | ${r.artist} | ${r.refKey} | **${fmt(r.toneOverlapPct)}** | ${fmt(r.toneJaccardPct)} | ${fmt(r.toneRecallPct)} | ${fmt(r.rootMatchPct)} | ${fmt(r.exactPct)} | ${fmt(r.majMinPct)} | ${r.detectedKey} | ${r.note} |`,
       );
     }
     lines.push(
-      `| **Average (full mix)** | | | **${avg(real, 'exactPct').toFixed(1)}** | **${avg(real, 'majMinPct').toFixed(1)}** | | |`,
+      `| **Average (full mix)** | | | **${avg(real, 'toneOverlapPct').toFixed(1)}** | ${avg(real, 'toneJaccardPct').toFixed(1)} | ${avg(real, 'toneRecallPct').toFixed(1)} | ${avg(real, 'rootMatchPct').toFixed(1)} | ${avg(real, 'exactPct').toFixed(1)} | ${avg(real, 'majMinPct').toFixed(1)} | | |`,
       '',
     );
   }
@@ -381,30 +415,33 @@ function writeDocs(rows: Row[]) {
     );
   } else {
     lines.push(
-      `Compared on the **first ${sepMaxSec}s** of each file (UMX-HQ on CPU in the harness; browser uses WebGPU when available).`,
+      `Compared on the **first ${sepMaxSec}s** of each file (UMX-HQ on CPU in the harness; browser uses WebGPU when available). Headline = **tone overlap %**.`,
       '',
-      '| Song | Baseline exact % | Baseline maj/min % | +UMX-HQ exact % | +UMX-HQ maj/min % | Δ maj/min |',
+      '| Song | Baseline tone % | +UMX-HQ tone % | Δ tone | Baseline exact / majmin | +UMX exact / majmin |',
       '|---|---:|---:|---:|---:|---:|',
     );
     for (const r of sep) {
       const baseTitle = r.title.replace(' (+UMX-HQ)', '');
       const base = real.find((x) => x.title === baseTitle);
-      // Parse firstNs maj/min from note: "first60s exact X% maj/min Y%"
+      let baseTone = NaN;
       let baseExact = NaN;
       let baseMM = NaN;
-      const m = base?.note.match(/first\d+s exact ([\d.]+)% maj\/min ([\d.]+)%/);
+      const m = base?.note.match(
+        /first\d+s tone ([\d.]+)% \(J=[\d.]+ R=[\d.]+ root=[\d.]+\) exact ([\d.]+)% maj\/min ([\d.]+)%/,
+      );
       if (m) {
-        baseExact = Number(m[1]);
-        baseMM = Number(m[2]);
+        baseTone = Number(m[1]);
+        baseExact = Number(m[2]);
+        baseMM = Number(m[3]);
       }
       const delta =
-        Number.isFinite(baseMM) && Number.isFinite(r.majMinPct)
-          ? (r.majMinPct - baseMM).toFixed(1)
+        Number.isFinite(baseTone) && Number.isFinite(r.toneOverlapPct)
+          ? (r.toneOverlapPct - baseTone).toFixed(1)
           : '—';
       const deltaSigned =
         delta === '—' ? '—' : `${Number(delta) >= 0 ? '+' : ''}${delta}`;
       lines.push(
-        `| ${baseTitle} | ${fmt(baseExact)} | ${fmt(baseMM)} | ${fmt(r.exactPct)} | ${fmt(r.majMinPct)} | ${deltaSigned} |`,
+        `| ${baseTitle} | ${fmt(baseTone)} | ${fmt(r.toneOverlapPct)} | ${deltaSigned} | ${fmt(baseExact)} / ${fmt(baseMM)} | ${fmt(r.exactPct)} / ${fmt(r.majMinPct)} |`,
       );
     }
     lines.push(
@@ -428,34 +465,44 @@ function writeDocs(rows: Row[]) {
     );
   } else {
     lines.push(
-      `Compared on the **first ${sepMaxSec}s** vs Ultimate Guitar–style references.`,
+      `Compared on the **first ${sepMaxSec}s** vs Ultimate Guitar–style references. **Tone % is the headline metric.**`,
       '',
-      '| Song | Fast (first Ns) exact % | Fast maj/min % | Precise exact % | Precise maj/min % | Δ maj/min | Detected key (precise) |',
-      '|---|---:|---:|---:|---:|---:|---|',
+      '| Song | Fast tone % | Precise tone % | Δ tone | Fast J / R / root | Precise J / R / root | Fast exact / majmin | Precise exact / majmin | Key (precise) |',
+      '|---|---:|---:|---:|---|---|---|---|---|',
     );
     for (const r of precise) {
       const baseTitle = r.title.replace(' (+precise)', '');
       const base = real.find((x) => x.title === baseTitle);
+      let baseTone = NaN;
+      let baseJ = NaN;
+      let baseR = NaN;
+      let baseRoot = NaN;
       let baseExact = NaN;
       let baseMM = NaN;
-      const m = base?.note.match(/first\d+s exact ([\d.]+)% maj\/min ([\d.]+)%/);
+      const m = base?.note.match(
+        /first\d+s tone ([\d.]+)% \(J=([\d.]+) R=([\d.]+) root=([\d.]+)\) exact ([\d.]+)% maj\/min ([\d.]+)%/,
+      );
       if (m) {
-        baseExact = Number(m[1]);
-        baseMM = Number(m[2]);
+        baseTone = Number(m[1]);
+        baseJ = Number(m[2]);
+        baseR = Number(m[3]);
+        baseRoot = Number(m[4]);
+        baseExact = Number(m[5]);
+        baseMM = Number(m[6]);
       }
       const delta =
-        Number.isFinite(baseMM) && Number.isFinite(r.majMinPct)
-          ? (r.majMinPct - baseMM).toFixed(1)
+        Number.isFinite(baseTone) && Number.isFinite(r.toneOverlapPct)
+          ? (r.toneOverlapPct - baseTone).toFixed(1)
           : '—';
       const deltaSigned =
         delta === '—' ? '—' : `${Number(delta) >= 0 ? '+' : ''}${delta}`;
       lines.push(
-        `| ${baseTitle} | ${fmt(baseExact)} | ${fmt(baseMM)} | ${fmt(r.exactPct)} | ${fmt(r.majMinPct)} | ${deltaSigned} | ${r.detectedKey} |`,
+        `| ${baseTitle} | ${fmt(baseTone)} | **${fmt(r.toneOverlapPct)}** | ${deltaSigned} | ${fmt(baseJ)} / ${fmt(baseR)} / ${fmt(baseRoot)} | ${fmt(r.toneJaccardPct)} / ${fmt(r.toneRecallPct)} / ${fmt(r.rootMatchPct)} | ${fmt(baseExact)} / ${fmt(baseMM)} | ${fmt(r.exactPct)} / ${fmt(r.majMinPct)} | ${r.detectedKey} |`,
       );
     }
     lines.push(
       '',
-      `Average precise maj/min: **${avg(precise, 'majMinPct').toFixed(1)}%** (fast first-${sepMaxSec}s baseline from table notes).`,
+      `Average precise **tone overlap**: **${avg(precise, 'toneOverlapPct').toFixed(1)}%** (J=${avg(precise, 'toneJaccardPct').toFixed(1)}, R=${avg(precise, 'toneRecallPct').toFixed(1)}, root=${avg(precise, 'rootMatchPct').toFixed(1)}; exact ${avg(precise, 'exactPct').toFixed(1)} / majmin ${avg(precise, 'majMinPct').toFixed(1)}).`,
       '',
     );
   }
@@ -463,6 +510,7 @@ function writeDocs(rows: Row[]) {
   lines.push(
     '## Limitations',
     '',
+    '- Headline accuracy is **shared chord-tone overlap**, not name match — sus/relative confusions (e.g. F#m7↔A) score partially instead of zero.',
     '- Non-ML template matching on commercial mixes trails ML; editor + simplify remain essential.',
     '- 精準模式 is opt-in (default 快速): ~34 MiB UMX + ~0.2 MiB Basic Pitch + longer runtime.',
     '- Separation / precise validation uses a time-capped clip so the harness finishes in CI-like environments.',
