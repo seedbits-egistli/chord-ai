@@ -10,7 +10,12 @@
  */
 
 import { trackBeats } from './beats.js';
-import { computeChromaFrames, estimateTuningCents, normalizeL2 } from './chroma.js';
+import {
+  averageChroma,
+  computeChromaFrames,
+  estimateTuningCents,
+  normalizeL2,
+} from './chroma.js';
 import { formatChord, parseChord, simplifyLabel } from './chordParse.js';
 import { detectKey } from './key.js';
 import { topKMatches, viterbiSmooth, type BeatObservation } from './match.js';
@@ -28,10 +33,15 @@ export interface NoteEvent {
 export interface PreciseDetectOptions extends DetectOptions {
   /** Use half-bar windows (2 beats) instead of one beat. Default true. */
   halfBar?: boolean;
-  /** Fraction of windows a PC must appear in to count as drone (default 0.42). */
+  /** Fraction of windows a PC must appear in to count as hard drone (default 0.7). */
   droneWindowFrac?: number;
-  /** Minimum relative weight vs peak to keep a PC after drone suppress (default 0.18). */
-  droneFloor?: number;
+  /**
+   * Mix instrumental audio chroma into note chroma (0–1). Default 0 —
+   * pure note-driven harmony; raise toward 0.3–0.4 to stabilize dense mixes.
+   */
+  audioChromaBlend?: number;
+  /** Emit slash chords when bass ≠ root. Default true. */
+  allowSlash?: boolean;
 }
 
 function midiToPc(midi: number): number {
@@ -161,20 +171,23 @@ function subtractDroneMean(chroma: Float32Array, mean: Float32Array, amount = 0.
   normalizeL2(chroma);
 }
 
-function applyBassSlash(label: ChordLabel, bassPc: number | null, bassWeight: number): ChordLabel {
-  if (bassPc === null || bassWeight < 0.02) return label;
+function applyBassSlash(
+  label: ChordLabel,
+  bassPc: number | null,
+  bassWeight: number,
+  allowSlash: boolean,
+): ChordLabel {
+  if (!allowSlash || bassPc === null || bassWeight < 0.04) {
+    return { root: label.root, quality: label.quality };
+  }
   const rel = (bassPc - label.root + 12) % 12;
   // Root in bass — no slash
   if (rel === 0) return { root: label.root, quality: label.quality };
-  // Common chord tones / inversions → slash
-  if (rel === 3 || rel === 4 || rel === 7 || rel === 10 || rel === 9 || rel === 5) {
+  // Common inversions / chord-tone bass only (avoid noisy slashes)
+  if (rel === 3 || rel === 4 || rel === 7 || rel === 10) {
     return { root: label.root, quality: label.quality, bass: bassPc };
   }
-  // Strong non-chord bass: still emit slash (user asked for slash support)
-  if (bassWeight > 0.08) {
-    return { root: label.root, quality: label.quality, bass: bassPc };
-  }
-  return label;
+  return { root: label.root, quality: label.quality };
 }
 
 function estimateKeyFromNoteHist(notes: NoteEvent[]): string {
@@ -203,6 +216,9 @@ export function detectChordsFromNotes(
   let bpm = options.bpmHint ?? 120;
   let beats: number[] = [];
   let timeSig = '4/4';
+  let audioFrames: ReturnType<typeof computeChromaFrames> | null = null;
+  const audioBlend = Math.min(1, Math.max(0, options.audioChromaBlend ?? 0));
+  const allowSlash = options.allowSlash !== false;
 
   if (beatAudio && beatAudio.samples.length > 1024) {
     const frameSize = options.frameSize ?? (beatAudio.sampleRate >= 44100 ? 8192 : 4096);
@@ -216,6 +232,7 @@ export function detectChordsFromNotes(
       tuning,
     );
     if (frames.length) {
+      audioFrames = frames;
       const tracked = trackBeats(frames, beatAudio.sampleRate, { bpmHint: options.bpmHint });
       bpm = tracked.bpm;
       beats = tracked.beats;
@@ -268,7 +285,14 @@ export function detectChordsFromNotes(
       for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     }
     if (options.suppressDrone !== false) {
-      subtractDroneMean(chroma, droneMean, 0.65);
+      subtractDroneMean(chroma, droneMean, 0.55);
+    }
+    if (audioFrames && audioBlend > 0) {
+      const ac = averageChroma(audioFrames, w.startMs, w.endMs).chroma;
+      for (let p = 0; p < 12; p++) {
+        chroma[p] = chroma[p]! * (1 - audioBlend) + ac[p]! * audioBlend;
+      }
+      normalizeL2(chroma);
     }
     peak = 0;
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
@@ -302,7 +326,12 @@ export function detectChordsFromNotes(
 
     const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, key);
     const candidates = raw.map((c) => {
-      const withSlash = applyBassSlash(c.label, bass?.pc ?? null, bass?.weight ?? 0);
+      const withSlash = applyBassSlash(
+        c.label,
+        bass?.pc ?? null,
+        bass?.weight ?? 0,
+        allowSlash,
+      );
       return {
         label: simplifyLabel(withSlash, simplifyLevel),
         score: c.score + (bass && bass.pc === c.label.root ? 0.04 : 0),
