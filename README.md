@@ -11,6 +11,7 @@
 - **進階模式（預設關閉）音源分離**：Open-Unmix **UMX-HQ** ONNX（~34MB vocals+bass，MIT）+ ONNX Runtime Web（WASM／WebGPU；ORT wasm 走 CDN，不進 Workers 靜態資產）。授權見 [`docs/models.md`](docs/models.md)
 - 「簡化和弦」滑桿 + click-to-fix 編輯
 - 移調 ±半音（升降記號依調）、Capo 建議、按法圖同步
+- **和弦試聽／播放進行**：點時間軸和弦以 Web Audio 合成音播放（鋼琴／吉他／烏克麗麗聲部；吉他可掃弦琶音）；「播放進行」依時間軸同步高亮和弦與歌詞；音量可調；可匯出 `.mid`（無額外音源下載）
 - 歌詞貼上後以時間錨點顯示「和弦在歌詞上方」
 - 匿名發布：Cloudflare Turnstile（可關閉）、每 IP 限流、秘密編輯連結、檢舉（可只下架歌詞）
 - D1 + FTS5（trigram）搜尋歌名／歌手／歌詞／和弦

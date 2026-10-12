@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   applySimplify,
   suggestCapo,
@@ -21,6 +21,16 @@ import { defaultSeparationEnabled } from '../lib/capabilities';
 import { publishSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
+import { PlaybackControls } from '../components/PlaybackControls';
+import type { PlayInstrument } from '../lib/chordVoicing';
+import type { StrumMode } from '../lib/chordSynth';
+import { getChordSynth } from '../lib/chordSynth';
+import {
+  playProgression,
+  playSingleChord,
+  type ProgressionHandle,
+} from '../lib/progressionPlayer';
+import { downloadMidi } from '../lib/midiExport';
 
 const COMMON = [
   'C', 'Cm', 'C7', 'Cmaj7', 'D', 'Dm', 'D7', 'E', 'Em', 'E7',
@@ -40,6 +50,12 @@ export function HomePage() {
   const [simplify, setSimplify] = useState(0.45);
   const [transpose, setTranspose] = useState(0);
   const [instrument, setInstrument] = useState<'guitar' | 'ukulele'>('guitar');
+  const [playInstrument, setPlayInstrument] = useState<PlayInstrument>('guitar');
+  const [strum, setStrum] = useState<StrumMode>('strum');
+  const [volume, setVolume] = useState(0.7);
+  const [playingIndex, setPlayingIndex] = useState<number | null>(null);
+  const [progressionPlaying, setProgressionPlaying] = useState(false);
+  const progRef = useRef<ProgressionHandle | null>(null);
   const [selected, setSelected] = useState(0);
   const [lyricsText, setLyricsText] = useState('');
   const [title, setTitle] = useState('');
@@ -52,6 +68,13 @@ export function HomePage() {
   const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
   const [lastSources, setLastSources] = useState<SeparateSources | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      progRef.current?.stop();
+      getChordSynth().stopAll();
+    };
+  }, []);
 
   async function refreshCacheStatus() {
     try {
@@ -96,6 +119,85 @@ export function HomePage() {
     if (!view) return [] as string[];
     return [...new Set(view.chords.map((c) => c.chord))].slice(0, 12);
   }, [view]);
+
+  const lyricLines = useMemo(
+    () => lyricsText.split(/\n/).map((t) => t.trim()).filter(Boolean),
+    [lyricsText],
+  );
+
+  const playingLyricLine = useMemo(() => {
+    if (playingIndex == null || !view || !lyricLines.length) return null;
+    const c = view.chords[playingIndex];
+    if (!c) return null;
+    const total = view.chords[view.chords.length - 1]!.endMs || 1;
+    const idx = Math.min(
+      lyricLines.length - 1,
+      Math.max(0, Math.floor((c.tMs / total) * lyricLines.length)),
+    );
+    return idx;
+  }, [playingIndex, view, lyricLines]);
+
+  async function onChordChipClick(i: number) {
+    if (!view) return;
+    setSelected(i);
+    try {
+      await playSingleChord(view.chords[i]!.chord, {
+        instrument: playInstrument,
+        strum: playInstrument === 'piano' ? 'block' : strum,
+        volume,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function onPlayProgression() {
+    if (!view?.chords.length) return;
+    progRef.current?.stop();
+    setProgressionPlaying(true);
+    try {
+      const handle = await playProgression(view.chords, {
+        instrument: playInstrument,
+        strum: playInstrument === 'piano' ? 'block' : strum,
+        volume,
+        onIndex: (idx) => {
+          setPlayingIndex(idx);
+          if (idx != null) setSelected(idx);
+        },
+        onDone: () => {
+          setProgressionPlaying(false);
+          setPlayingIndex(null);
+          progRef.current = null;
+        },
+      });
+      progRef.current = handle;
+    } catch (e) {
+      setProgressionPlaying(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function onStopProgression() {
+    progRef.current?.stop();
+    progRef.current = null;
+    setProgressionPlaying(false);
+    setPlayingIndex(null);
+  }
+
+  function onExportMidi() {
+    if (!view?.chords.length) return;
+    downloadMidi(view.chords, {
+      bpm: view.bpm,
+      instrument: playInstrument,
+      title: title.trim() || 'chord-ai',
+      filename: `${(title.trim() || 'chords').replace(/\s+/g, '_')}.mid`,
+    });
+  }
+
+  function onPlayInstrumentChange(v: PlayInstrument) {
+    setPlayInstrument(v);
+    if (v === 'guitar' || v === 'ukulele') setInstrument(v);
+  }
 
   async function runDetect(samples: Float32Array, sampleRate: number) {
     setBusy(true);
@@ -263,8 +365,6 @@ export function HomePage() {
     }
   }
 
-  const lyricLines = lyricsText.split(/\n/).map((t) => t.trim()).filter(Boolean);
-
   return (
     <>
       <section className="hero">
@@ -402,7 +502,7 @@ export function HomePage() {
           <section className="panel" style={{ marginTop: '1rem' }}>
             <h2>和弦時間軸</h2>
             <p className="lead">
-              調性 {view.key} · {view.bpm} BPM · 點一下即可改和弦
+              調性 {view.key} · {view.bpm} BPM · 點和弦可試聽（已套用移調）· 可播放整段進行
             </p>
             <div className="controls">
               <label>
@@ -437,16 +537,36 @@ export function HomePage() {
                 </div>
               </label>
               <label>
-                樂器
+                按法圖樂器
                 <select
                   value={instrument}
-                  onChange={(e) => setInstrument(e.target.value as 'guitar' | 'ukulele')}
+                  onChange={(e) => {
+                    const v = e.target.value as 'guitar' | 'ukulele';
+                    setInstrument(v);
+                    setPlayInstrument(v);
+                  }}
                 >
                   <option value="guitar">吉他</option>
                   <option value="ukulele">烏克麗麗</option>
                 </select>
               </label>
             </div>
+            <PlaybackControls
+              playInstrument={playInstrument}
+              onPlayInstrument={onPlayInstrumentChange}
+              strum={strum}
+              onStrum={setStrum}
+              volume={volume}
+              onVolume={(v) => {
+                setVolume(v);
+                getChordSynth().setVolume(v);
+              }}
+              playing={progressionPlaying}
+              onPlayProgression={() => void onPlayProgression()}
+              onStop={onStopProgression}
+              onExportMidi={onExportMidi}
+              disabled={busy}
+            />
             {capo && (
               <p className="status">
                 Capo 建議：{capo.summary}
@@ -458,8 +578,9 @@ export function HomePage() {
                 <button
                   key={`${c.tMs}-${i}`}
                   type="button"
-                  className={`chord-chip ${selected === i ? 'active' : ''}`}
-                  onClick={() => setSelected(i)}
+                  className={`chord-chip ${selected === i ? 'active' : ''} ${playingIndex === i ? 'playing' : ''}`}
+                  onClick={() => void onChordChipClick(i)}
+                  title="點擊試聽此和弦"
                 >
                   {c.chord}
                   <span className="t">{(c.tMs / 1000).toFixed(1)}s</span>
@@ -517,7 +638,10 @@ export function HomePage() {
             {lyricLines.length > 0 && (
               <div className="lyrics">
                 {lyricLines.map((line, i) => (
-                  <div className="lyric-line" key={i}>
+                  <div
+                    className={`lyric-line ${playingLyricLine === i ? 'playing' : ''}`}
+                    key={i}
+                  >
                     <div className="lyric-chords">
                       {chordsForLine(view.chords, i, lyricLines.length).map((c, j) => (
                         <span key={j}>{c.chord}</span>

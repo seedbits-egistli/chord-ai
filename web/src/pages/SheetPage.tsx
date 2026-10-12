@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   suggestCapo,
@@ -9,6 +9,16 @@ import {
 import { getSheet, reportSheet, updateSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
+import { PlaybackControls } from '../components/PlaybackControls';
+import type { PlayInstrument } from '../lib/chordVoicing';
+import type { StrumMode } from '../lib/chordSynth';
+import { getChordSynth } from '../lib/chordSynth';
+import {
+  playProgression,
+  playSingleChord,
+  type ProgressionHandle,
+} from '../lib/progressionPlayer';
+import { downloadMidi } from '../lib/midiExport';
 
 export function SheetPage({ edit = false }: { edit?: boolean }) {
   const { id = '' } = useParams();
@@ -23,6 +33,12 @@ export function SheetPage({ edit = false }: { edit?: boolean }) {
   const [lyricsRemoved, setLyricsRemoved] = useState(false);
   const [transpose, setTranspose] = useState(0);
   const [instrument, setInstrument] = useState<'guitar' | 'ukulele'>('guitar');
+  const [playInstrument, setPlayInstrument] = useState<PlayInstrument>('guitar');
+  const [strum, setStrum] = useState<StrumMode>('strum');
+  const [volume, setVolume] = useState(0.7);
+  const [playingIndex, setPlayingIndex] = useState<number | null>(null);
+  const [progressionPlaying, setProgressionPlaying] = useState(false);
+  const progRef = useRef<ProgressionHandle | null>(null);
   const [token, setToken] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -31,6 +47,13 @@ export function SheetPage({ edit = false }: { edit?: boolean }) {
       setToken(window.location.hash.replace(/^#/, ''));
     }
   }, [edit]);
+
+  useEffect(() => {
+    return () => {
+      progRef.current?.stop();
+      getChordSynth().stopAll();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,23 +66,22 @@ export function SheetPage({ edit = false }: { edit?: boolean }) {
         setKey(String(data.sheet.key_sig || data.sheet.key || 'C'));
         setBpm(Number(data.sheet.bpm || 120));
         setTranspose(Number(data.sheet.default_transpose || 0));
-        setInstrument((data.sheet.instrument as 'guitar' | 'ukulele') || 'guitar');
+        const inst = (data.sheet.instrument as 'guitar' | 'ukulele') || 'guitar';
+        setInstrument(inst);
+        setPlayInstrument(inst);
+        const mapped = (data.chords || []).map((c) => ({
+          tMs: Number(c.tMs),
+          endMs: Number(c.tMs) + 500,
+          chord: String(c.chord),
+          beat: c.beat != null ? Number(c.beat) : undefined,
+          lineIdx: c.lineIdx != null ? Number(c.lineIdx) : undefined,
+          charOffset: c.charOffset != null ? Number(c.charOffset) : undefined,
+          strum: c.strum ? String(c.strum) : undefined,
+        }));
         setChords(
-          (data.chords || []).map((c) => ({
-            tMs: Number(c.tMs),
-            endMs: Number(c.tMs) + 500,
-            chord: String(c.chord),
-            beat: c.beat != null ? Number(c.beat) : undefined,
-            lineIdx: c.lineIdx != null ? Number(c.lineIdx) : undefined,
-            charOffset: c.charOffset != null ? Number(c.charOffset) : undefined,
-            strum: c.strum ? String(c.strum) : undefined,
-          })),
-        );
-        // fix endMs from next
-        setChords((prev) =>
-          prev.map((c, i) => ({
+          mapped.map((c, i) => ({
             ...c,
-            endMs: prev[i + 1]?.tMs ?? c.tMs + 1000,
+            endMs: mapped[i + 1]?.tMs ?? c.tMs + 1000,
           })),
         );
         setLyrics(
@@ -90,6 +112,61 @@ export function SheetPage({ edit = false }: { edit?: boolean }) {
     [viewChords, instrument],
   );
   const unique = [...new Set(viewChords.map((c) => c.chord))].slice(0, 12);
+
+  const playingLyricLine = useMemo(() => {
+    if (playingIndex == null || !lyrics.length) return null;
+    const c = viewChords[playingIndex];
+    if (!c) return null;
+    if (c.lineIdx != null) return c.lineIdx;
+    const total = viewChords[viewChords.length - 1]?.endMs || 1;
+    return Math.min(
+      lyrics.length - 1,
+      Math.max(0, Math.floor((c.tMs / total) * lyrics.length)),
+    );
+  }, [playingIndex, viewChords, lyrics]);
+
+  async function onChordClick(i: number) {
+    try {
+      await playSingleChord(viewChords[i]!.chord, {
+        instrument: playInstrument,
+        strum: playInstrument === 'piano' ? 'block' : strum,
+        volume,
+      });
+      setPlayingIndex(i);
+      window.setTimeout(() => setPlayingIndex((cur) => (cur === i ? null : cur)), 400);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function onPlayProgression() {
+    if (!viewChords.length) return;
+    progRef.current?.stop();
+    setProgressionPlaying(true);
+    try {
+      progRef.current = await playProgression(viewChords, {
+        instrument: playInstrument,
+        strum: playInstrument === 'piano' ? 'block' : strum,
+        volume,
+        onIndex: setPlayingIndex,
+        onDone: () => {
+          setProgressionPlaying(false);
+          setPlayingIndex(null);
+          progRef.current = null;
+        },
+      });
+    } catch (e) {
+      setProgressionPlaying(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function onStopProgression() {
+    progRef.current?.stop();
+    progRef.current = null;
+    setProgressionPlaying(false);
+    setPlayingIndex(null);
+  }
 
   async function onSave() {
     if (!token) {
@@ -164,28 +241,73 @@ export function SheetPage({ edit = false }: { edit?: boolean }) {
           </div>
         </label>
         <label>
-          樂器
-          <select value={instrument} onChange={(e) => setInstrument(e.target.value as 'guitar' | 'ukulele')}>
+          按法圖樂器
+          <select
+            value={instrument}
+            onChange={(e) => {
+              const v = e.target.value as 'guitar' | 'ukulele';
+              setInstrument(v);
+              setPlayInstrument(v);
+            }}
+          >
             <option value="guitar">吉他</option>
             <option value="ukulele">烏克麗麗</option>
           </select>
         </label>
       </div>
+
+      <PlaybackControls
+        playInstrument={playInstrument}
+        onPlayInstrument={(v) => {
+          setPlayInstrument(v);
+          if (v === 'guitar' || v === 'ukulele') setInstrument(v);
+        }}
+        strum={strum}
+        onStrum={setStrum}
+        volume={volume}
+        onVolume={(v) => {
+          setVolume(v);
+          getChordSynth().setVolume(v);
+        }}
+        playing={progressionPlaying}
+        onPlayProgression={() => void onPlayProgression()}
+        onStop={onStopProgression}
+        onExportMidi={() =>
+          downloadMidi(viewChords, {
+            bpm,
+            instrument: playInstrument,
+            title: title || 'chord-ai',
+            filename: `${(title || 'chords').replace(/\s+/g, '_')}.mid`,
+          })
+        }
+      />
+
       {capo && <p className="status">Capo 建議：{capo.summary}</p>}
+      {msg && <p className="status">{msg}</p>}
+      {error && <p className="error">{error}</p>}
 
       <div className="chord-timeline">
         {viewChords.map((c, i) => (
-          <div className="chord-chip" key={i}>
+          <button
+            type="button"
+            className={`chord-chip ${playingIndex === i ? 'playing active' : ''}`}
+            key={i}
+            onClick={() => void onChordClick(i)}
+            title="點擊試聽"
+          >
             {c.chord}
             <span className="t">{(c.tMs / 1000).toFixed(1)}s</span>
-          </div>
+          </button>
         ))}
       </div>
 
       {!lyricsRemoved && lyrics.length > 0 && (
         <div className="lyrics" style={{ marginTop: '1rem' }}>
           {lyrics.map((l) => (
-            <div className="lyric-line" key={l.lineIdx}>
+            <div
+              className={`lyric-line ${playingLyricLine === l.lineIdx ? 'playing' : ''}`}
+              key={l.lineIdx}
+            >
               <div className="lyric-chords">
                 {viewChords
                   .filter((c) => c.lineIdx === l.lineIdx)
@@ -226,16 +348,14 @@ export function SheetPage({ edit = false }: { edit?: boolean }) {
         </div>
       )}
 
-      <div className="controls" style={{ marginTop: '1.25rem' }}>
+      <div className="controls" style={{ marginTop: '1rem' }}>
         <button className="btn btn-secondary" type="button" onClick={() => onReport('remove_lyrics')}>
-          檢舉：只下架歌詞
+          檢舉／下架歌詞
         </button>
         <button className="btn btn-secondary" type="button" onClick={() => onReport('remove_sheet')}>
-          檢舉整份樂譜
+          檢舉整份譜
         </button>
       </div>
-      {msg && <p className="status">{msg}</p>}
-      {error && <p className="error">{error}</p>}
     </section>
   );
 }

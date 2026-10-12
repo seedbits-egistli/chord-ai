@@ -10,7 +10,7 @@ import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const BASE = process.env.BASE_URL || 'http://127.0.0.1:5173';
+const BASE = process.env.BASE_URL || 'http://localhost:5173';
 const CHROME = process.env.CHROME_PATH || '/usr/local/bin/google-chrome';
 
 function isModelOrOrt(url) {

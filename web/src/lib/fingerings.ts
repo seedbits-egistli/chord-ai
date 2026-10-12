@@ -68,12 +68,30 @@ export interface FingeringShape {
   fingers: number[];
   barres: Array<{ fromString: number; toString: number; fret: number }>;
   baseFret: number;
+  /** MIDI note numbers from chords-db when available (low→high). */
+  midi: number[];
 }
 
-export function lookupFingering(
-  chord: string,
-  instrument: 'guitar' | 'ukulele' = 'guitar',
-): FingeringShape | null {
+/** Standard tunings (MIDI) for frets→midi fallback. */
+const GUITAR_OPEN = [40, 45, 50, 55, 59, 64]; // E2–E4
+const UKE_OPEN = [67, 60, 64, 69]; // G4 C4 E4 A4 (re-entrant)
+
+function fretsToMidi(
+  frets: number[],
+  baseFret: number,
+  open: number[],
+): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < frets.length && i < open.length; i++) {
+    const f = frets[i]!;
+    if (f < 0) continue;
+    const abs = f === 0 ? 0 : f + Math.max(0, baseFret - 1);
+    out.push(open[i]! + abs);
+  }
+  return out;
+}
+
+function lookupPosition(chord: string, instrument: 'guitar' | 'ukulele'): Position | null {
   const db = instrument === 'ukulele' ? ukeDb : guitarDb;
   const parts = splitChord(chord);
   if (!parts) return null;
@@ -82,8 +100,15 @@ export function lookupFingering(
   const entry =
     entries.find((e) => e.suffix === parts.suffix) ||
     entries.find((e) => e.suffix === 'major' || e.suffix === 'minor');
-  if (!entry?.positions?.length) return null;
-  const pos = entry.positions[0]!;
+  return entry?.positions?.[0] ?? null;
+}
+
+export function lookupFingering(
+  chord: string,
+  instrument: 'guitar' | 'ukulele' = 'guitar',
+): FingeringShape | null {
+  const pos = lookupPosition(chord, instrument);
+  if (!pos) return null;
   const strings = pos.frets.length;
   const barres: FingeringShape['barres'] = [];
   const barreFrets = pos.barres
@@ -94,12 +119,30 @@ export function lookupFingering(
   for (const bf of barreFrets) {
     barres.push({ fromString: strings, toString: 1, fret: bf });
   }
+  const baseFret = pos.baseFret || 1;
+  const midi =
+    pos.midi && pos.midi.length
+      ? [...pos.midi]
+      : fretsToMidi(
+          pos.frets,
+          baseFret,
+          instrument === 'ukulele' ? UKE_OPEN : GUITAR_OPEN,
+        );
   return {
     chord,
     strings,
     frets: pos.frets,
     fingers: pos.fingers,
     barres,
-    baseFret: pos.baseFret || 1,
+    baseFret,
+    midi,
   };
+}
+
+/** MIDI notes for guitar/ukulele voicing (empty if unknown). */
+export function lookupVoicingMidi(
+  chord: string,
+  instrument: 'guitar' | 'ukulele',
+): number[] {
+  return lookupFingering(chord, instrument)?.midi ?? [];
 }
