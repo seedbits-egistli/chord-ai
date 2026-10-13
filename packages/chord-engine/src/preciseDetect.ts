@@ -10,7 +10,7 @@
  * No staff notation — chords only. No model training. Not derived from GPL Chordino.
  */
 
-import { trackBeats } from './beats.js';
+import { trackBeatsFromAudio } from './beats.js';
 import {
   averageChroma,
   computeChromaFrames,
@@ -431,7 +431,9 @@ export function detectChordsFromNotes(
     );
     if (frames.length) {
       audioFrames = frames;
-      const tracked = trackBeats(frames, beatAudio.sampleRate, { bpmHint: options.bpmHint });
+      const tracked = trackBeatsFromAudio(beatAudio.samples, beatAudio.sampleRate, {
+        bpmHint: options.bpmHint,
+      });
       bpm = tracked.bpm;
       beats = tracked.beats;
       timeSig = tracked.timeSig;
