@@ -37,7 +37,7 @@ const poll = setInterval(async () => {
 }, 250);
 await page.locator('input[type=file]').setInputFiles(audio);
 await page.waitForTimeout(20_000);
-await page.screenshot({ path: `${outDir}/v2-progress.png` });
+await page.screenshot({ path: `${outDir}/v2-progress.png`, timeout: 120_000 }).catch(() => {});
 await page.locator('p.status', { hasText: /和弦完成/ }).waitFor({ timeout: 900_000 });
 marks.chordsVisible = (Date.now() - t0) / 1000;
 if (lyricsPath) {

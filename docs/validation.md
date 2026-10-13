@@ -189,3 +189,22 @@ Post-decode, training-free: each decoded triad run (≥2 beats) averages its pre
 | Wonderwall (remaster) | 66.2 | 68.3 | 66.5 | 68.6 |
 
 Limit: Wonderwall's F#m7 never appears because the separated "other" stem chroma carries almost no E during F#m beats (0.03–0.18 vs F# ≈ 0.9); B7sus4 is mostly decoded with a different root (F#m/Bm), and this pass never changes roots.
+
+## 精準 v2（瀏覽器內：Beat This! small + BTC + wav2vec2 int8）
+
+全部以 onnxruntime-web（wasm EP）在瀏覽器 Web Worker 執行，無伺服器。前 60 秒，tone % / strict %。
+
+| Song | 現行引擎 | Python 原型（UMX 60s + small0 + 自製 CQT） | TS 移植（同輸入） | TS 全曲 UMX（真實瀏覽器路徑） |
+|---|---:|---:|---:|---:|
+| Let It Be | 79.4 / 76.2 | 76.1 | 76.1 / 70.8 | 75.0 |
+| Knockin' on Heaven's Door | 93.4 / 86.1 | 97.0 | 97.0 / 90.2 | 97.0 |
+| Stand By Me | 96.4 / 94.8 | 92.4 | 91.7 / 89.6 | 96.5 |
+| Someone Like You | 97.6 / 97.0 | 88.0 | 88.0 / 88.0 | 90.1 |
+| Riptide | 83.7 / 75.8 | 82.1 | 85.1 / 81.3 | 76.2 |
+| Hey Jude | 94.3 / 86.1 | 91.3 | 91.8 / 87.6 | 96.7 |
+| Wonderwall (remaster) | 68.3 / 68.6 | 85.6 | 85.6 / 83.9 | 66.7 |
+| 平均 tone | 87.6 | 87.5 | 87.9 | 85.5 |
+
+- TS 移植與 Python 在相同輸入下差距 ≤1 分（Riptide +3）。
+- 瓶頸是分離品質：全曲 UMX-HQ 讓 Wonderwall 的延伸和弦比例掉到 0.17（htdemucs 為 0.42）→ 選到 maj/min 模型 → 66.7。Python + htdemucs 平均 89.8–90.5。
+- htdemucs ONNX（StemSplitio, fp16 權重 166 MB）：onnxruntime-node 單執行緒每 7.8 s 片段約 7.8–8.2 s（≈1× 即時），RSS 3.4–5.6 GB，超過 wasm32 4 GB 上限 → 目前無法在瀏覽器實用執行。
