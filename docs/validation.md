@@ -218,3 +218,29 @@ Limit: Wonderwall's F#m7 never appears because the separated "other" stem chroma
 
 下載量：和弦必需 36.5 MB（BTC×2 + Beat This!）+ 既有 UMX；有貼歌詞再加 95.2 MB。
 問題：wasm 多執行緒（numThreads>1）在 worker 內卡住，暫時改單執行緒；歌詞對齊約 1.7–2× 歌曲長度，需多執行緒或 WebGPU。
+
+### 優化後（2026-10-13，box 8 核 headless Chromium，wasm 多執行緒，Let It Be 4:03）
+
+| 階段 | 之前（單執行緒） | UMX 路徑（預設） | HT-Demucs 路徑（`?sep=htdemucs`） |
+|---|---:|---:|---:|
+| 偵測節拍（與分離並行） | 37 s | ~15 s | ~13 s |
+| 分離人聲 | 50 s | ~36 s | ~250 s（RTF ≈1.0，8 執行緒） |
+| 辨識和弦 | 7 s | 6 s | 8 s |
+| **和弦出現** | **95 s** | **41–43 s** | **271 s** |
+| 歌詞對齊（wav2vec2 int8） | +418 s | +122 s | +95 s |
+
+- 多執行緒卡死原因：dev server 送 `/ort/*` 時沒有 COOP/COEP，pthread worker 不是 cross-origin isolated。已修正。
+- WebGPU：選用（`?ort_ep=webgpu`），box 只有 SwiftShader（30 s 片段的節拍偵測要 200 s），不具代表性，未在實體 GPU 測。
+- 人聲靜音段跳過：HT-Demucs 人聲上省 32%（Let It Be：Node 26.7 s→18.2 s，LRC 行首中位誤差 0.36 s 不變），UMX 人聲漏音多，幾乎沒省到。
+
+### 分離模型候選
+
+| 模型 | 授權（程式／權重） | 大小 | 記憶體 | 速度（瀏覽器 wasm 8 執行緒） | 6 首平均 tone（無 Hey Jude） |
+|---|---|---:|---:|---:|---:|
+| UMX-HQ（目前） | MIT / MIT | 既有 | 小 | ~0.15× 歌曲長度 | 83.6 |
+| HT-Demucs（StemSplitio ONNX fp16） | MIT / MIT | 166 MB | Node 峰值 0.6–0.8 GB（圖最佳化關閉；開啟時 2–6.5 GB） | ~1.0× 歌曲長度 | **87.2** |
+| htdemucs_ft（4 模型 bag） | MIT / MIT | 4× | ~4 GB | ~4× 慢 | 未測（不可行） |
+| UMX-L | MIT / CC BY-NC-SA | — | — | — | 排除（非商用） |
+| MDX-Net / BS-/Mel-RoFormer / SCNet 社群權重 | 程式多為 MIT；權重授權未明確 | — | — | — | 未驗證授權，未採用 |
+
+同一 6 首（Let It Be、Knockin'、Stand By Me、Someone Like You、Riptide、Wonderwall）：現行引擎 86.5、v2+UMX 83.6、v2+HT-Demucs 87.2（Python htdemucs 88.6）。Hey Jude 音檔遺失（YouTube 需登入驗證），未納入。
