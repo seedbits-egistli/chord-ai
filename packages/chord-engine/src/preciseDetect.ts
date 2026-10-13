@@ -73,6 +73,10 @@ export interface PreciseDetectOptions extends DetectOptions {
   bassSamples?: Float32Array;
   /** Highest MIDI note accepted as a real bass-stem root (higher = leaked instrument). Default 52 (E3). */
   bassMaxMidi?: number;
+  /** sus2/sus4/7sus4 must beat the best maj/min candidate by this score margin. Default 0.03. */
+  susMargin?: number;
+  /** Slash bass needs the bass note to sustain this fraction of the beat. Default 0.45. */
+  slashMinSustain?: number;
   /** @deprecated Prefer metricDecode; kept for callers that passed halfBar. */
   halfBar?: boolean;
 }
@@ -664,16 +668,30 @@ export function detectChordsFromNotes(
       localNovelty: weakBass || useNnls ? localNovelty[bi] : undefined,
     };
     const raw = topKMatches(chroma, bassChroma, simplifyLevel, 8, matchCtx);
+    // sus chords must beat the best plain triad by a margin (shared-tone
+    // smearing from ringing strings / previous chord easily fakes sus2/sus4)
+    const susMargin = options.susMargin ?? 0.03;
+    let bestTriad = -Infinity;
+    for (const c of raw) {
+      if (c.label.quality === 'maj' || c.label.quality === 'min') bestTriad = Math.max(bestTriad, c.score);
+    }
+    const winSec = Math.max(1e-3, w.endSec - w.startSec);
+    // slash only with strong, sustained bass in bass register
+    const slashOk =
+      allowSlash && !weakBass && !!bassHit && bassHit.weight >= (options.slashMinSustain ?? 0.45) * winSec;
     const candidates = raw.map((c) => {
+      const q = c.label.quality;
+      const isSus = q === 'sus2' || q === 'sus4' || q === '7sus4';
+      const susPenalty = isSus && c.score < bestTriad + susMargin ? susMargin : 0;
       const withSlash = applyBassSlash(
         c.label,
-        weakBass ? null : (bassHit?.pc ?? null),
-        weakBass ? 0 : (bassHit?.weight ?? 0),
-        allowSlash && !weakBass,
+        slashOk ? bassHit!.pc : null,
+        slashOk ? bassHit!.weight : 0,
+        slashOk,
       );
       return {
         label: simplifyLabel(withSlash, simplifyLevel),
-        score: c.score + (bassHit && bassHit.pc === c.label.root ? 0.04 : 0),
+        score: c.score - susPenalty + (bassHit && bassHit.pc === c.label.root ? 0.04 : 0),
       };
     });
     observations.push({ startMs: w.startMs, endMs: w.endMs, candidates });
