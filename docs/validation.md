@@ -113,3 +113,26 @@ Training-free precise decode (Mauch & Dixon ISMIR 2010, independent MIT impl. �
 - **No commercial recordings are in git.**
 
 *Generated 2026-10-12T16:55:11.579Z by `npm run validate:real -w @chord-ai/engine`.*
+
+## Precise mode: tempo / no-bass root / sus-slash (7-song local bench)
+
+Commits `063908c` (audio-domain tempo + Ellis DP beats), `2b1c848` (per-beat bass reliability + lowest-note root evidence), `2cda79f` (sus margin, sustained-bass slash). Baseline `2f72ac1`. First 60 s, **no bpmHint** (real user path), local audio only (never committed). Tone % = `scoreAgainstTimedReference` with ±8 s offset + reference loop-phase search. **Strict** = same but offset search limited to ±1 beat (closer to what a user sees on the detected grid).
+
+| Song | Ref BPM | BPM before | BPM after | Tone % before | +tempo | +no-bass root | +sus/slash (final) | Strict before → after |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Let It Be | 72 | 76 | 73.8 | 68.6 | 79.4 | 79.4 | **79.4** | 64.3 → 76.4 |
+| Knockin' on Heaven's Door | 68 | 117.5 | 69 | 93.6 | 91.8 | 91.8 | **93.4** | 86.7 → 86.1 |
+| Stand By Me | 118 | 107.7 | 120.2 | 89 | 96.2 | 96.2 | **96.4** | 85.8 → 94.8 |
+| Someone Like You | 67.5 | 117.5 | 67.2 | 91 | 92.4 | 92.9 | **97.6** | 88.6 → 97 |
+| Riptide | 102 | 107.7 | 101.4 | 83.7 | 85.1 | 83.9 | **81.6** | 78.4 → 71.1 |
+| Hey Jude | 74.5 | 76 | 74.9 | 90.9 | 89.8 | 92 | **94.3** | 84.1 → 86.1 |
+| Wonderwall | 87 | 117.5 | 87.6 | 55 | 54 | 54 | **54** | 50.9 → 50.1 |
+
+With bpmHint (legacy harness for HJ/WW): Hey Jude 94.3 → 94.3, Wonderwall 56.2 → 54
+
+Tempo: 7/7 songs now at the reference metrical level (was 2/7 within 5%). Method: log-magnitude spectral-flux onset envelopes (full band, <180 Hz bass band, chroma-change novelty) at ~86 fps; ACF tempogram with harmonic summation; metrical hierarchy (×2^k, ternary ×3/2 only with own evidence); level chosen by a log-normal prior (90 BPM, σ = 0.6 oct) × relative salience^0.3; Ellis 2007 DP beat tracking (tightness 100). Sensitivity: prior centre 85 flips Stand By Me to 60, 100 flips Knockin'/Someone Like You to 136 — 2:1 is inherently ambiguous, so the prior is the deciding knob. Synthetic tests (`tests/beats.test.ts`): 68/90/120 exact incl. syncopation; 60 → 120 and 150 → 75 (octave-equivalent, accepted); drift followed.
+
+Known regressions / open issues:
+- Riptide 83.7 → 81.6 (strict 78.4 → 71.1): ukulele intro still Fm (F4-dominant uke notes, key prior Ab); narrow-register detector fires but treble chroma decides.
+- Wonderwall flat (~54–56). Finding: detected chord changes are steady every **2 beats** at 87 BPM (cycle ≈ 5.5 s). Scoring Wonderwall with one reference chord per 2 beats (bpm 174 in the loop expander) gives **69.1 %** final (67.0 no-hint / 71.3 hinted at baseline). The `wonderwall-real` fixture (one chord per 4-beat bar) should be verified by ear before more tuning against it.
+- Sus margin (0.03) is currently a no-op on this set; most spurious sus/slash removal comes from the slash/bass gating (slash labels: SLY 10 → 1, SBM 4 → 0, Riptide 4 → 0).
