@@ -3,11 +3,15 @@ import {
   ACCOMP_LEVEL_LABEL,
   buildAccompanimentChart,
   chartToStrumEvents,
+  mapChordSpans,
+  simplifyChordForLevel,
   type AccompLevel,
   type DetectionResult,
 } from '@chord-ai/engine';
 import { getChordSynth } from '../lib/chordSynth';
 import { ShapeDiagram } from './ShapeDiagram';
+import { LyricChartView } from './LyricChartView';
+import type { AlignedLyrics } from '../lib/v2';
 
 const LEVELS: AccompLevel[] = ['simple', 'standard', 'raw'];
 const LEVEL_HINT: Record<AccompLevel, string> = {
@@ -23,10 +27,18 @@ export function AccompanimentChart({
   result,
   lyricLines = [],
   volume = 0.7,
+  aligned = null,
+  time = null,
+  onSeek,
 }: {
   result: DetectionResult;
   lyricLines?: string[];
   volume?: number;
+  /** v2: word-level aligned lyrics → UG / ChordPro chart with karaoke highlight */
+  aligned?: AlignedLyrics | null;
+  /** current local playback time (s) */
+  time?: number | null;
+  onSeek?: (t: number) => void;
 }) {
   const [level, setLevel] = useState<AccompLevel>('simple');
   const [capoSel, setCapoSel] = useState<'auto' | number>('auto');
@@ -79,6 +91,17 @@ export function AccompanimentChart({
     const endMs = events[events.length - 1]!.tMs - t0 + events[events.length - 1]!.durMs + 300;
     timers.current.push(window.setTimeout(() => setPlayingBar(null), endMs));
   }
+
+  // chords as the player fingers them (level + capo shape), merged
+  const shapeSpans = useMemo(
+    () =>
+      mapChordSpans(result.chords, (c) => {
+        const sounding = simplifyChordForLevel(c, level, chart.key);
+        return sounding === 'N' ? 'N' : chart.capo.shapes[sounding] ?? sounding;
+      }),
+    [result.chords, level, chart],
+  );
+  const beatSec = 60 / (result.bpm || 90);
 
   const firstMusicBar = Math.max(0, chart.bars.findIndex((b) => b.chords.some((c) => c.shape !== 'N')));
   const bars = chart.bars.slice(firstMusicBar);
@@ -171,7 +194,9 @@ export function AccompanimentChart({
         ))}
       </div>
 
-      {lyricRows.length > 0 ? (
+      {aligned && aligned.words.length > 0 ? (
+        <LyricChartView aligned={aligned} chords={shapeSpans} beatSec={beatSec} time={time} onSeek={onSeek} />
+      ) : lyricRows.length > 0 ? (
         <div className="accomp-lyrics">
           {lyricRows.map((row, i) => (
             <div key={i} className="accomp-lyric-line">

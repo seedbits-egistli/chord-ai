@@ -129,13 +129,41 @@ function ensureOrtRuntime(): Plugin {
   };
 }
 
+/**
+ * Dev-only: serve v2 ONNX models from a local folder at /models/ (production uses VITE_MODEL_BASE_URL,
+ * e.g. the R2 bucket). Folder: $CHORD_AI_MODELS_DIR or <repo>/models-v2 (gitignored).
+ */
+function serveLocalModels(): Plugin {
+  const dir = path.resolve(process.env.CHORD_AI_MODELS_DIR ?? path.resolve(__dirname, '../models-v2'));
+  return {
+    name: 'serve-local-models',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const raw = req.url?.split('?')[0] ?? '';
+        if (!raw.startsWith('/models/')) return next();
+        const name = decodeURIComponent(raw.slice('/models/'.length));
+        const file = path.join(dir, name);
+        if (!name || name.includes('..') || !existsSync(file) || !statSync(file).isFile()) {
+          res.statusCode = 404;
+          res.end(`model not found: ${name} (put files in ${dir})`);
+          return;
+        }
+        res.setHeader('Content-Type', name.endsWith('.json') ? 'application/json' : 'application/octet-stream');
+        res.setHeader('Content-Length', String(statSync(file).size));
+        res.setHeader('Cache-Control', 'no-cache');
+        createReadStream(file).pipe(res);
+      });
+    },
+  };
+}
+
 const ortWasmExtern = path.resolve(
   __dirname,
   '../node_modules/onnxruntime-web/dist/ort.wasm.min.mjs',
 );
 
 export default defineConfig({
-  plugins: [react(), ensureOrtRuntime(), stripBundledOrtWasm()],
+  plugins: [react(), ensureOrtRuntime(), serveLocalModels(), stripBundledOrtWasm()],
   resolve: {
     // Prefer extern-wasm build so ort.env.wasm.wasmPaths (/ort/) is used —
     // not the default bundle that resolves .wasm via import.meta.url.
