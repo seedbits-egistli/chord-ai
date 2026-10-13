@@ -19,6 +19,7 @@ import {
   rmsEnergy,
 } from './chroma.js';
 import { formatChord, parseChord, simplifyLabel } from './chordParse.js';
+import { applyChordExtensions, type ExtensionOptions } from './chordExtensions.js';
 import {
   buildBeatChromas,
   estimateDownbeatFromBeatChromas,
@@ -81,6 +82,8 @@ export interface PreciseDetectOptions extends DetectOptions {
   vocabPrior?: number;
   /** Slash bass needs the bass note to sustain this fraction of the beat. Default 0.45. */
   slashMinSustain?: number;
+  /** Post-decode 7th/sus upgrade from sustained chroma evidence (false = off). Default on. */
+  extensions?: boolean | ExtensionOptions;
   /** @deprecated Prefer metricDecode; kept for callers that passed halfBar. */
   halfBar?: boolean;
 }
@@ -553,6 +556,7 @@ export function detectChordsFromNotes(
   const keyConfidence = weakBass ? 0.5 : 0.65;
 
   const observations: BeatObservation[] = [];
+  const beatChroma: (Float32Array | null)[] = [];
   for (let bi = 0; bi < windows.length; bi++) {
     const w = windows[bi]!;
     let noteCh = noteChroma(accompanimentNotes, w.startSec, w.endSec, hardDrones);
@@ -598,6 +602,8 @@ export function detectChordsFromNotes(
       normalizeL2(chroma);
     }
 
+    // colour-tone pass needs common/drone tones, so keep the pre-discount chroma
+    const extChroma = Float32Array.from(chroma);
     // Soft drone discount on weak-bass / NNLS paths only
     if (options.suppressDrone !== false && (weakBass || useNnls) && bpReliability < 0.75) {
       const amt = 0.35 + 0.25 * (1 - bpReliability);
@@ -613,6 +619,7 @@ export function detectChordsFromNotes(
     let peak = 0;
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     const sparse = peak < 0.08 && !nt;
+    beatChroma[bi] = sparse ? null : extChroma;
 
     const rawBassHit = lowestBassPc(bassNotes, w.startSec, w.endSec);
     const bassHit =
@@ -777,6 +784,11 @@ export function detectChordsFromNotes(
     const b = formatChord(labels[i]!, false);
     const c = formatChord(labels[i + 1]!, false);
     if (a === c && a !== b) labels[i] = { ...labels[i - 1]! };
+  }
+
+  if (options.extensions !== false && simplifyLevel < 0.85) {
+    const extOpts = typeof options.extensions === 'object' ? options.extensions : {};
+    labels = applyChordExtensions(labels, beatChroma, extOpts);
   }
 
   const chords: ChordEvent[] = [];

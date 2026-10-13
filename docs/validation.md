@@ -173,3 +173,19 @@ A gentler always-on version (weight scaled by 1 − rel) cost Hey Jude −6.8, s
 | Wonderwall (remaster) | 87 | 86.2 | 66.2 | 66.5 |
 
 Wonderwall: bars 1–13 lock to the verse loop (F#m7→F#m, A→A, Esus4→E/A); B7sus4 is never detected (absorbed into F#m/Bm/Asus2). 0:36–0:44 detected Em/D/Em/G — unverified.
+
+## 7th / sus colour-tone pass (chordExtensions.ts)
+
+Post-decode, training-free: each decoded triad run (≥2 beats) averages its pre-drone-discount chroma, subtracts the median-bin noise floor, and upgrades to m7/7 (b7 ≥ 0.9× triad mean), sus4/sus2/7sus4 (suspended tone ≥ 0.8× root+5th mean and ≥ 1.4× the 3rd, or 3rd essentially absent), never changing the root. maj7 is off by default (every maj7 emitted on the bench was vocal/melody leakage). Option `extensions: false` disables it.
+
+| Song | Tone before | Tone after | Strict before | Strict after |
+|---|---:|---:|---:|---:|
+| Let It Be | 79.4 | 79.1 | 76.4 | 76.2 |
+| Knockin' on Heaven's Door | 93.4 | 93.4 | 86.1 | 86.1 |
+| Stand By Me | 96.4 | 96.4 | 94.8 | 94.8 |
+| Someone Like You | 97.6 | 97.6 | 97.0 | 97.0 |
+| Riptide | 83.7 | 83.7 | 75.8 | 75.4 |
+| Hey Jude | 94.3 | 94.3 | 86.1 | 86.1 |
+| Wonderwall (remaster) | 66.2 | 68.3 | 66.5 | 68.6 |
+
+Limit: Wonderwall's F#m7 never appears because the separated "other" stem chroma carries almost no E during F#m beats (0.03–0.18 vs F# ≈ 0.9); B7sus4 is mostly decoded with a different root (F#m/Bm), and this pass never changes roots.
