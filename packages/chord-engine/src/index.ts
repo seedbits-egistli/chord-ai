@@ -26,6 +26,7 @@ export * from './accompaniment.js';
 export * from './v2/types.js';
 export * from './v2/cqt.js';
 export * from './v2/btc.js';
+export * from './v2/htdemucs.js';
 export * from './v2/beatThis.js';
 export * from './v2/ctcAlign.js';
 export * from './v2/lyricChart.js';

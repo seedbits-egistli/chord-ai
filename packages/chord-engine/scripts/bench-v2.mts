@@ -6,7 +6,7 @@ import { trackBeatsBeatThis } from '../src/v2/beatThis.ts';
 import { detectChordsBtc, btcNames, type BtcModel } from '../src/v2/btc.ts';
 import type { OnnxRun } from '../src/v2/types.ts';
 const M = process.env.MODELS ?? '/workspace/models-v2';
-const OUT = process.env.OUT ?? '/workspace/proto-v2/out/ts-v2';
+const OUT = process.env.OUT ?? '/workspace/bench/out/ts-v2';
 mkdirSync(OUT, { recursive: true });
 async function sess(f: string): Promise<OnnxRun> {
   const s = await ort.InferenceSession.create(`${M}/${f}`, { executionProviders: ['cpu'] });
@@ -27,7 +27,7 @@ const stats = JSON.parse(readFileSync('/workspace/proto-v2/onnx/btc-majmin.json'
 const statsL = JSON.parse(readFileSync('/workspace/proto-v2/onnx/btc-large.json', 'utf8'));
 models.majmin.mean = stats.mean; models.majmin.std = stats.std; models.large.mean = statsL.mean; models.large.std = statsL.std;
 const beatRun = await sess('beat-this-small.onnx');
-const songs: Record<string, string> = { hey_jude: '/tmp/chord-ai-test-audio/hey_jude.mp3' };
+const songs: Record<string, string> = { hey_jude: '/workspace/bench-audio/hey_jude.mp3' };
 for (const k of ['knockin', 'let_it_be', 'riptide', 'someone_like_you', 'stand_by_me', 'wonderwall-v2']) songs[k] = `/workspace/bench-audio/${k}.mp3`;
 const only = process.argv[2]?.split(',');
 for (const [key, path] of Object.entries(songs)) {
@@ -50,10 +50,13 @@ for (const [key, path] of Object.entries(songs)) {
       for (const j of [2 * i, 2 * i + 1]) s += all[2 * n + j]! + all[3 * n + j]! + all[4 * n + j]! + all[5 * n + j]!;
       acc[i] = s / 4;
     }
+  } else if (src === 'htd') {
+    const w = readFileSync(`${process.env.HTD_DIR ?? '/workspace/bench/htd'}/${key}-acc22k.f32`);
+    acc = new Float32Array(w.buffer.slice(w.byteOffset, w.byteOffset + w.byteLength));
   } else if (src === 'mix') {
     acc = mix;
   } else {
-    const w = readFileSync(`/workspace/proto-v2/out/${key}-umxacc22k.f32`);
+    const w = readFileSync(`${process.env.UMX_DIR ?? '/workspace/bench/umxfull'}/${key}-umxacc22k.f32`);
     acc = new Float32Array(w.buffer, w.byteOffset, w.byteLength / 4);
   }
   t = Date.now();
