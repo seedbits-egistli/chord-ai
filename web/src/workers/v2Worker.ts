@@ -9,6 +9,7 @@ import {
   alignLyrics,
   btcNames,
   detectChordsBtc,
+  separateHtdemucs,
   toDetectionResult,
   trackBeatsBeatThis,
   type DetectionResult,
@@ -21,11 +22,13 @@ import { MODEL_BASE_URL, V2_MODELS, modelUrl, type ModelSpec } from '../lib/mode
 export type V2Stage = 'download' | 'separate' | 'beats' | 'chords' | 'align';
 export type V2Request =
   | { type: 'beats'; id: number; mix22k: Float32Array }
+  | { type: 'separate'; id: number; left: Float32Array; right: Float32Array }
   | { type: 'chords'; id: number; acc22k: Float32Array; beats: number[]; downbeats: number[] }
   | { type: 'align'; id: number; voc16k: Float32Array; lyrics: string }
   | { type: 'status'; id: number; withAlign: boolean };
 export type V2Response =
   | { id: number; type: 'stage'; stage: V2Stage; progress: number; detail: string; bytes?: { loaded: number; total: number } }
+  | { id: number; type: 'separateDone'; acc: Float32Array; vocals: Float32Array }
   | { id: number; type: 'beatsDone'; beats: number[]; downbeats: number[] }
   | { id: number; type: 'chordsDone'; result: DetectionResult; extra: { model: string; halfTime: boolean; downbeatsMs: number[] } }
   | { id: number; type: 'alignDone'; lines: { text: string; section: number }[]; words: { word: string; line: number; start: number; end: number; confidence: number }[] }
@@ -115,7 +118,7 @@ async function session(m: ModelSpec): Promise<OnnxRun> {
   if (!s) {
     await initOrt();
     const t = performance.now();
-    s = await ort.InferenceSession.create(new Uint8Array(buffers.get(url)!), { executionProviders: eps, graphOptimizationLevel: 'all' });
+    s = await ort.InferenceSession.create(new Uint8Array(buffers.get(url)!), { executionProviders: eps, graphOptimizationLevel: m.noGraphOpt ? 'disabled' : 'all', enableMemPattern: !m.noGraphOpt, enableCpuMemArena: !m.noGraphOpt });
     sessions.set(url, s);
     dbg('session', m.label, `${(performance.now() - t).toFixed(0)} ms`);
   }
@@ -141,6 +144,14 @@ self.onmessage = async (ev: MessageEvent<V2Request>) => {
       return;
     }
     const stage = (stage: V2Stage, detail: string) => (p: number) => post({ id: msg.id, type: 'stage', stage, progress: p, detail });
+    if (msg.type === 'separate') {
+      await ensureModels(msg.id, [V2_MODELS.htdemucs]);
+      const run = await session(V2_MODELS.htdemucs);
+      buffers.delete(modelUrl(V2_MODELS.htdemucs)); // session holds its own copy
+      const r = await separateHtdemucs(msg.left, msg.right, run, stage('separate', '分離人聲（HT-Demucs）'));
+      (self as unknown as Worker).postMessage({ id: msg.id, type: 'separateDone', acc: r.acc, vocals: r.vocals } satisfies V2Response, [r.acc.buffer, r.vocals.buffer]);
+      return;
+    }
     if (msg.type === 'beats') {
       await ensureModels(msg.id, [V2_MODELS.beat]);
       const beatRun = await session(V2_MODELS.beat);

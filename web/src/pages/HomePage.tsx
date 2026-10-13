@@ -25,7 +25,7 @@ import { StaffView } from '../components/StaffView';
 import { PlaybackControls } from '../components/PlaybackControls';
 import { AccompanimentChart } from '../components/AccompanimentChart';
 import { StagedProgress } from '../components/StagedProgress';
-import { analyzeV2, CancelledError, type AlignedLyrics, type StageState, type V2Stage } from '../lib/v2';
+import { analyzeV2, CancelledError, type Separator, type AlignedLyrics, type StageState, type V2Stage } from '../lib/v2';
 import type { PlayInstrument } from '../lib/chordVoicing';
 import type { StrumMode } from '../lib/chordSynth';
 import { getChordSynth } from '../lib/chordSynth';
@@ -43,6 +43,7 @@ const COMMON = [
 ];
 
 export function HomePage() {
+  const [separator, setSeparator] = useState<Separator>('umx');
   const [status, setStatus] = useState('選擇麥克風或上傳音檔開始（音訊不會上傳）。');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -307,6 +308,7 @@ export function HomePage() {
           },
         },
         ac.signal,
+        separator,
       );
     } catch (e) {
       if (e instanceof CancelledError) {
@@ -569,6 +571,18 @@ export function HomePage() {
               {modeHint}
             </p>
           </div>
+          {mode === 'v2' && (
+            <div className="mode-toggle" role="radiogroup" aria-label="分離品質" style={{ marginTop: '0.5rem' }}>
+              <label>
+                <input type="radio" name="sep" data-testid="sep-umx" checked={separator === 'umx'} disabled={busy} onChange={() => setSeparator('umx')} />
+                分離：快速（UMX-HQ）
+              </label>
+              <label>
+                <input type="radio" name="sep" data-testid="sep-htdemucs" checked={separator === 'htdemucs'} disabled={busy} onChange={() => setSeparator('htdemucs')} />
+                高品質（HT-Demucs，+166 MB，約歌曲長度 0.7–1 倍時間）
+              </label>
+            </div>
+          )}
           {mode === 'v2' && (
             <div className="field" style={{ marginTop: '0.75rem', maxWidth: '36rem' }}>
               <label>歌詞（選填，先貼再上傳；空行＝新段落）</label>

@@ -57,19 +57,26 @@ export function resample(x: Float32Array, from: number, to: number): Float32Arra
   return out;
 }
 
-let worker: Worker | null = null;
-function getWorker() {
-  worker ??= new Worker(new URL('../workers/v2Worker.ts', import.meta.url), { type: 'module', name: ortWorkerConfig() });
-  return worker;
+// Two v2 workers so HT-Demucs separation and Beat This! can run concurrently (one ORT instance each).
+const workers: Record<'main' | 'sep', Worker | null> = { main: null, sep: null };
+function getWorker(role: 'main' | 'sep' = 'main') {
+  workers[role] ??= new Worker(new URL('../workers/v2Worker.ts', import.meta.url), { type: 'module', name: ortWorkerConfig(role === 'sep' ? 8 : 4) });
+  return workers[role]!;
+}
+export type Separator = 'umx' | 'htdemucs';
+/** ?sep=htdemucs|umx overrides the UI choice (testing). */
+export function separatorOverride(): Separator | null {
+  const v = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('sep') : null;
+  return v === 'htdemucs' || v === 'umx' ? v : null;
 }
 let seq = 1;
 
 export class CancelledError extends Error { constructor() { super('已取消'); } }
 
-function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => void, signal?: AbortSignal): Promise<T> {
-  const w = getWorker();
+function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => void, signal?: AbortSignal, role: 'main' | 'sep' = 'main'): Promise<T> {
+  const w = getWorker(role);
   return new Promise((resolve, reject) => {
-    const abort = () => { cleanup(); worker?.terminate(); worker = null; reject(new CancelledError()); };
+    const abort = () => { cleanup(); workers[role]?.terminate(); workers[role] = null; reject(new CancelledError()); };
     const handler = (ev: MessageEvent<V2Response>) => {
       const m = ev.data;
       if (m.id !== req.id) return;
@@ -84,6 +91,7 @@ function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => voi
     w.addEventListener('message', handler);
     const transfer: Transferable[] = [];
     if (req.type === 'beats') transfer.push(req.mix22k.buffer);
+    if (req.type === 'separate') transfer.push(req.left.buffer);
     if (req.type === 'chords') transfer.push(req.acc22k.buffer);
     if (req.type === 'align') transfer.push(req.voc16k.buffer);
     w.postMessage(req, transfer);
@@ -107,7 +115,9 @@ export async function analyzeV2(
   lyrics: string,
   h: V2Handlers,
   signal?: AbortSignal,
+  separator: Separator = 'umx',
 ): Promise<void> {
+  separator = separatorOverride() ?? separator;
   // one ETA per stage: separation and beat tracking run concurrently
   const etas = new Map<V2Stage, Eta>();
   const etaOf = (s: V2Stage) => { let e = etas.get(s); if (!e) { e = new Eta(); etas.set(s, e); } return e; };
@@ -123,36 +133,46 @@ export async function analyzeV2(
   const beatsP = rpc<Extract<V2Response, { type: 'beatsDone' }>>({ type: 'beats', id: seq++, mix22k }, forward, signal);
   beatsP.catch(() => {});
 
-  // 1) separation (UMX-HQ worker; its own model download is reported as 下載模型)
+  // 1) separation
   emit('separate', 'active', 0);
-  let sepDownloading = false;
-  const onAbort = () => resetSeparateWorker();
-  signal?.addEventListener('abort', onAbort);
-  let stems;
-  try {
-    stems = await separateInWorker(samples, sampleRate, {
-      onProgress: (p, detail, fromCache) => {
-        if (signal?.aborted) return;
-        const dl = /下載|MB/.test(detail) && fromCache === false;
-        if (dl) { if (!sepDownloading) etaOf('download').reset(); sepDownloading = true; emit('download', 'active', Math.min(0.99, p / 0.5), { detail }); return; }
-        if (sepDownloading) { sepDownloading = false; emit('download', 'done', 1); }
-        emit('separate', 'active', p, { detail });
-      },
-    });
-  } finally {
-    signal?.removeEventListener('abort', onAbort);
+  let acc: Float32Array;
+  let voc: Float32Array;
+  let sr: number;
+  if (separator === 'htdemucs') {
+    const x44 = resample(samples, sampleRate, 44100);
+    const sp = await rpc<Extract<V2Response, { type: 'separateDone' }>>(
+      { type: 'separate', id: seq++, left: x44, right: x44 }, forward, signal, 'sep');
+    acc = sp.acc; voc = sp.vocals; sr = 44100;
+  } else {
+    let sepDownloading = false;
+    const onAbort = () => resetSeparateWorker();
+    signal?.addEventListener('abort', onAbort);
+    let stems;
+    try {
+      stems = await separateInWorker(samples, sampleRate, {
+        onProgress: (p, detail, fromCache) => {
+          if (signal?.aborted) return;
+          const dl = /下載|MB/.test(detail) && fromCache === false;
+          if (dl) { if (!sepDownloading) etaOf('download').reset(); sepDownloading = true; emit('download', 'active', Math.min(0.99, p / 0.5), { detail }); return; }
+          if (sepDownloading) { sepDownloading = false; emit('download', 'done', 1); }
+          emit('separate', 'active', p, { detail });
+        },
+      });
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+    }
+    if (signal?.aborted) throw new CancelledError();
+    sr = stems.sampleRate;
+    const n = stems.other.left.length;
+    acc = new Float32Array(n);
+    voc = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      acc[i] = (stems.bass.left[i]! + stems.bass.right[i]! + stems.other.left[i]! + stems.other.right[i]!) / 2;
+      voc[i] = (stems.vocals.left[i]! + stems.vocals.right[i]!) / 2;
+    }
   }
-  if (signal?.aborted) throw new CancelledError();
   emit('separate', 'done', 1);
 
-  const sr = stems.sampleRate;
-  const n = stems.other.left.length;
-  const acc = new Float32Array(n);
-  const voc = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    acc[i] = (stems.bass.left[i]! + stems.bass.right[i]! + stems.other.left[i]! + stems.other.right[i]!) / 2;
-    voc[i] = (stems.vocals.left[i]! + stems.vocals.right[i]!) / 2;
-  }
   const acc22k = resample(acc, sr, 22050);
   const voc16k = lyrics.trim() ? resample(voc, sr, 16000) : null;
 
