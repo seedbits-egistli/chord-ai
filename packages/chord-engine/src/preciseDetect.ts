@@ -75,6 +75,10 @@ export interface PreciseDetectOptions extends DetectOptions {
   bassMaxMidi?: number;
   /** sus2/sus4/7sus4 must beat the best maj/min candidate by this score margin. Default 0.03. */
   susMargin?: number;
+  /** Beats quieter than this fraction of the loud (90th pct) beat level are output as N (0 = off). Default 0 — 0.12 removed the Wonderwall pre-roll but cost Stand By Me -1.9. */
+  silenceGate?: number;
+  /** Weight of the song-level chord-vocabulary prior on quiet beats (0 = off). Default 0.3. */
+  vocabPrior?: number;
   /** Slash bass needs the bass note to sustain this fraction of the beat. Default 0.45. */
   slashMinSustain?: number;
   /** @deprecated Prefer metricDecode; kept for callers that passed halfBar. */
@@ -697,17 +701,76 @@ export function detectChordsFromNotes(
     observations.push({ startMs: w.startMs, endMs: w.endMs, candidates });
   }
 
-  const labels = metricDecode
-    ? viterbiSmoothMetric(observations, downbeat.beatInBar, {
-        selfBias: 0.58,
-        sameRootBias: 0.2,
-        changeCost: [-0.03, -0.3, -0.11, -0.27],
-      })
-    : viterbiSmoothMetric(
-        observations,
-        observations.map(() => 0),
-        { selfBias: 0.72 + (1 - simplifyLevel) * 0.1, changeCost: [-0.12, -0.12, -0.12, -0.12] },
-      );
+  const decode = (obs: BeatObservation[]) =>
+    metricDecode
+      ? viterbiSmoothMetric(obs, downbeat.beatInBar, {
+          selfBias: 0.58,
+          sameRootBias: 0.2,
+          changeCost: [-0.03, -0.3, -0.11, -0.27],
+        })
+      : viterbiSmoothMetric(
+          obs,
+          obs.map(() => 0),
+          { selfBias: 0.72 + (1 - simplifyLevel) * 0.1, changeCost: [-0.12, -0.12, -0.12, -0.12] },
+        );
+
+  // Beat loudness of the instrumental (silence gate + vocabulary confidence)
+  const beatRms = beatAudio ? windowRms(beatAudio.samples, beatAudio.sampleRate, windows) : null;
+  let loudRef = 0;
+  if (beatRms) {
+    const sorted = Array.from(beatRms).sort((x, y) => x - y);
+    loudRef = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
+  }
+  const silenceGate = options.silenceGate ?? 0;
+  // Silence gate on the full mix (instrumental + vocals): a vocal-led intro
+  // with quiet accompaniment is music; a near-silent lead-in is not.
+  let mixRms: Float32Array | null = null;
+  let mixRef = 0;
+  if (beatAudio) {
+    const v = options.vocalSamples;
+    const mix = new Float32Array(beatAudio.samples.length);
+    for (let i = 0; i < mix.length; i++) mix[i] = beatAudio.samples[i]! + (v && i < v.length ? v[i]! : 0);
+    mixRms = windowRms(mix, beatAudio.sampleRate, windows);
+    const sorted = Array.from(mixRms).sort((x, y) => x - y);
+    mixRef = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
+  }
+  const silent = windows.map((_, i) => !!mixRms && mixRef > 0 && mixRms[i]! < silenceGate * mixRef);
+
+  let labels = decode(observations);
+
+  // Song-level vocabulary prior: chords decoded on the loud, confident body of
+  // the song become a soft prior for quieter / sparser passages (intros,
+  // breakdowns) whose evidence is ambiguous. Only re-ranks existing candidates.
+  const vocabWeight = options.vocabPrior ?? 0.3;
+  if (vocabWeight > 0 && beatRms && loudRef > 0 && labels.length > 8) {
+    const vocab = new Map<string, number>();
+    let tot = 0;
+    for (let i = 0; i < labels.length; i++) {
+      const rel = beatRms[i]! / loudRef;
+      if (rel < 0.5 || silent[i]) continue;
+      const k = `${labels[i]!.root}:${labels[i]!.quality}`;
+      vocab.set(k, (vocab.get(k) ?? 0) + 1);
+      tot++;
+    }
+    if (tot >= 8) {
+      let maxShare = 0;
+      for (const v of vocab.values()) maxShare = Math.max(maxShare, v / tot);
+      const adjusted: BeatObservation[] = observations.map((o, i) => {
+        const rel = Math.min(1, beatRms[i]! / loudRef);
+        // only clearly quiet passages (<25% of loud level) lean on the song vocabulary
+        const w = vocabWeight * Math.max(0, 1 - rel / 0.25);
+        if (w <= 0) return o;
+        return {
+          ...o,
+          candidates: o.candidates.map((c) => {
+            const share = (vocab.get(`${c.label.root}:${c.label.quality}`) ?? 0) / tot;
+            return { ...c, score: c.score + w * (share / Math.max(1e-6, maxShare)) };
+          }),
+        };
+      });
+      labels = decode(adjusted);
+    }
+  }
 
   for (let i = 1; i < labels.length - 1; i++) {
     const a = formatChord(labels[i - 1]!, false);
@@ -718,7 +781,7 @@ export function detectChordsFromNotes(
 
   const chords: ChordEvent[] = [];
   for (let i = 0; i < labels.length; i++) {
-    const chord = formatChord(labels[i]!, key);
+    const chord = silent[i] ? 'N' : formatChord(labels[i]!, key);
     const startMs = observations[i]!.startMs;
     const endMs = observations[i]!.endMs;
     const conf = observations[i]!.candidates[0]?.score;

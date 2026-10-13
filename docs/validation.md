@@ -138,3 +138,22 @@ Known regressions / open issues:
 - Riptide 83.7 → 81.6 (strict 78.4 → 71.1): ukulele intro still Fm (F4-dominant uke notes, key prior Ab); narrow-register detector fires but treble chroma decides.
 - Wonderwall flat (~54–56). Finding: detected chord changes are steady every **2 beats** at 87 BPM (cycle ≈ 5.5 s). Scoring Wonderwall with one reference chord per 2 beats (bpm 174 in the loop expander) gives **69.1 %** final (67.0 no-hint / 71.3 hinted at baseline). Verified by ear afterwards: verse is 2 beats per chord; fixture corrected (see correction note at top). Corrected score at `2cda79f`: 68.0 % (strict 61.4 %).
 - Sus margin (0.03) is currently a no-op on this set; most spurious sus/slash removal comes from the slash/bass gating (slash labels: SLY 10 → 1, SBM 4 → 0, Riptide 4 → 0).
+
+### Intros without bass (commit after `21320ba`)
+
+Investigation (first 60 s, local audio):
+- **Wonderwall**: the file has a ~16 s near-silent lead-in (mix RMS ≈ −21 dB vs body; file 4:39 vs album 4:18, upload pre-roll). The other stem has 2 notes in 0–16 s; the bass stem is essentially empty for the whole first minute (RMS ≈ 0.0012 constant, also in the verse), so the G1/F1 "bass" notes are low-level separation noise — not cello, not mis-separated guitar. Music starts ≈16 s and is detected F#m–A–Esus4/B7sus4 from there. The "intro errors" are on non-music; scoring still counts that span because the reference loop starts at 0. A mix-level silence gate (`silenceGate`, emits N) is implemented but **off by default** (0.12 cost Stand By Me −1.9, no metric gain).
+- **Riptide**: the intro is real music (vocals + ukulele; instrumental is only ~7 % of the loud level because vocals dominate). Tuning ≈ −33 ¢. Ukulele notes are F4-dominant; per-beat candidates rank Bbm/Db/Ab/Fm closely, and the HMM self-transition bias locked onto Fm (the common-tone "average").
+- **Fix**: song-level vocabulary prior — chords decoded on loud beats (≥50 % of 90th-pct level) re-rank candidates on clearly quiet beats (<25 %), weight 0.3 × (1 − rel/0.25). Two-pass Viterbi; candidates only re-ranked, never added.
+
+| Song | Tone % before → after | Strict before → after |
+|---|---|---|
+| Let It Be | 79.4 → 79.4 | 76.4 → 76.4 |
+| Knockin' | 93.4 → 93.4 | 86.1 → 86.1 |
+| Stand By Me | 96.4 → 96.4 | 94.8 → 94.8 |
+| Someone Like You | 97.6 → 97.6 | 97.0 → 97.0 |
+| Riptide | 81.6 → **83.7** | 71.1 → **75.8** |
+| Hey Jude | 94.3 → 94.3 | 86.1 → 86.1 |
+| Wonderwall (2-beat ref) | 68.0 → 68.0 | 61.4 → 61.4 |
+
+A gentler always-on version (weight scaled by 1 − rel) cost Hey Jude −6.8, so the prior is restricted to clearly quiet passages.
