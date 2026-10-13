@@ -208,3 +208,13 @@ Limit: Wonderwall's F#m7 never appears because the separated "other" stem chroma
 - TS 移植與 Python 在相同輸入下差距 ≤1 分（Riptide +3）。
 - 瓶頸是分離品質：全曲 UMX-HQ 讓 Wonderwall 的延伸和弦比例掉到 0.17（htdemucs 為 0.42）→ 選到 maj/min 模型 → 66.7。Python + htdemucs 平均 89.8–90.5。
 - htdemucs ONNX（StemSplitio, fp16 權重 166 MB）：onnxruntime-node 單執行緒每 7.8 s 片段約 7.8–8.2 s（≈1× 即時），RSS 3.4–5.6 GB，超過 wasm32 4 GB 上限 → 目前無法在瀏覽器實用執行。
+
+### 瀏覽器實測（headless Chromium，box 8 核，wasm 單執行緒，`scripts/verify-v2.mjs`）
+
+| 歌曲 | 下載模型（本機） | 分離人聲 UMX | 偵測節拍 | 辨識和弦 | 和弦出現 | 歌詞對齊 wav2vec2 int8 |
+|---|---:|---:|---:|---:|---:|---:|
+| Let It Be（4:03） | 2.5 s | 50 s | 37 s | 7 s | 95 s | +418 s（共 513 s） |
+| Hey Jude（7:11） | — | ~95 s | ~50 s | — | 151 s | 未量完（>10 分） |
+
+下載量：和弦必需 36.5 MB（BTC×2 + Beat This!）+ 既有 UMX；有貼歌詞再加 95.2 MB。
+問題：wasm 多執行緒（numThreads>1）在 worker 內卡住，暫時改單執行緒；歌詞對齊約 1.7–2× 歌曲長度，需多執行緒或 WebGPU。
