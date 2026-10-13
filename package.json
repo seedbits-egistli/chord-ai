@@ -4,23 +4,33 @@
   "private": true,
   "description": "Open-source in-browser chord recognition (MIT)",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "workspaces": [
     "packages/*",
     "web",
     "worker"
   ],
   "scripts": {
-    "dev": "npm run build:engine && concurrently -k -n engine,web,api -c teal,cyan,orange \"npm run dev -w @chord-ai/engine\" \"npm run dev -w @chord-ai/web\" \"npm run dev -w @chord-ai/worker\"",
+    "sync:ort": "node scripts/sync-ort-runtime.mjs",
+    "predev": "npm run sync:ort && node scripts/ensure-web-dist.mjs && npm run build:engine",
+    "dev": "concurrently -k -n engine,web,api -c teal,cyan,orange \"npm run dev -w @chord-ai/engine\" \"npm run dev -w @chord-ai/web\" \"npm run dev -w @chord-ai/worker\"",
+    "prebuild": "npm run sync:ort && node scripts/ensure-web-dist.mjs",
     "build": "npm run build -w @chord-ai/engine && npm run build -w @chord-ai/web && npm run build -w @chord-ai/worker",
     "build:engine": "npm run build -w @chord-ai/engine",
     "test": "npm run test -w @chord-ai/engine",
     "validate": "npm run validate -w @chord-ai/engine",
     "db:migrate:local": "wrangler d1 migrations apply chord-ai --local --persist-to worker/.wrangler/state",
-    "deploy:dry": "npm run build && echo \"Run: wrangler deploy (requires Cloudflare credentials)\"",
+    "deploy:dry": "npm run build && node scripts/ensure-web-dist.mjs && echo \"Run: wrangler deploy (requires Cloudflare credentials)\"",
+    "verify:cache": "node scripts/verify-model-cache.mjs",
+    "verify:playback": "node scripts/verify-playback.mjs",
+    "verify:separation": "node scripts/verify-separation.mjs",
     "typecheck": "npm run typecheck -w @chord-ai/engine && npm run typecheck -w @chord-ai/web && npm run typecheck -w @chord-ai/worker"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "playwright-core": "^1.64.0",
     "typescript": "^5.8.2",
     "wrangler": "^4.14.0"
   }

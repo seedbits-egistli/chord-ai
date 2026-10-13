@@ -1,4 +1,4 @@
-/** Device / backend hints for optional Demucs separation. */
+/** Device hints for optional advanced-mode UMX separation (always default-off). */
 
 export function isMobileUa(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -18,12 +18,13 @@ export async function hasWebGpu(): Promise<boolean> {
   }
 }
 
+export type UiDetectMode = 'fast' | 'precise';
+
 /**
- * Default: ON for desktop with WebGPU; OFF on mobile / no WebGPU.
- * User can still toggle in the UI.
+ * Default mode is always 快速. 精準 uses UMX + Basic Pitch (longer runtime).
  */
-export async function defaultSeparationEnabled(): Promise<{
-  enabled: boolean;
+export async function defaultDetectMode(): Promise<{
+  mode: UiDetectMode;
   webgpu: boolean;
   mobile: boolean;
   reason: string;
@@ -32,24 +33,32 @@ export async function defaultSeparationEnabled(): Promise<{
   const webgpu = await hasWebGpu();
   if (mobile) {
     return {
-      enabled: false,
+      mode: 'fast',
       webgpu,
       mobile,
-      reason: '行動裝置預設關閉（模型約 172MB，建議桌面 WebGPU）',
-    };
-  }
-  if (webgpu) {
-    return {
-      enabled: true,
-      webgpu,
-      mobile,
-      reason: '偵測到 WebGPU，預設啟用 HTDemucs 分離',
+      reason: '精準模式在行動裝置上會較慢（UMX ~34MB + Basic Pitch 轉錄）',
     };
   }
   return {
-    enabled: false,
+    mode: 'fast',
     webgpu,
     mobile,
-    reason: '無 WebGPU：預設關閉（仍可手動開啟，將使用較慢的 WASM）',
+    reason: '精準模式：UMX-HQ 分離 → Basic Pitch 音符 → 和弦推斷（可快取模型）',
+  };
+}
+
+/** @deprecated use defaultDetectMode */
+export async function defaultSeparationEnabled(): Promise<{
+  enabled: boolean;
+  webgpu: boolean;
+  mobile: boolean;
+  reason: string;
+}> {
+  const d = await defaultDetectMode();
+  return {
+    enabled: d.mode === 'precise',
+    webgpu: d.webgpu,
+    mobile: d.mobile,
+    reason: d.reason,
   };
 }

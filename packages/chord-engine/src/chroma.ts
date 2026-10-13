@@ -75,46 +75,128 @@ export interface ChromaFrame {
   energy: number;
 }
 
-/** Estimate global tuning offset in cents from spectral peaks (−50…+50). */
+/** Quadratic (parabolic) peak offset in bins from three magnitude samples. */
+export function parabolicPeakOffset(ym1: number, y0: number, yp1: number): number {
+  const denom = ym1 - 2 * y0 + yp1;
+  if (Math.abs(denom) < 1e-18) return 0;
+  const delta = (0.5 * (ym1 - yp1)) / denom;
+  if (!Number.isFinite(delta)) return 0;
+  return Math.max(-0.5, Math.min(0.5, delta));
+}
+
+/**
+ * Estimate global tuning offset in cents from spectral peaks (−50…+50).
+ *
+ * Samples many frames across the clip, interpolates peak bins with a
+ * parabolic fit, then takes an energy-weighted circular mean of cent
+ * deviations (period 100¢). More robust than a coarse histogram vote.
+ */
 export function estimateTuningCents(
   samples: Float32Array,
   sampleRate: number,
   frameSize = 8192,
 ): number {
+  if (samples.length < frameSize) return 0;
   const window = hannWindow(frameSize);
-  const start = Math.min(
-    Math.floor(samples.length * 0.2),
-    Math.max(0, samples.length - frameSize * 4),
-  );
-  const votes = new Float32Array(21); // -50..+50 step 5
-  for (let s = 0; s < 4; s++) {
-    const off = start + s * frameSize;
-    if (off + frameSize > samples.length) break;
+  const hop = Math.max(256, Math.floor(frameSize / 4));
+  const maxFrames = 96;
+  const usable = samples.length - frameSize;
+  const stride =
+    usable <= 0
+      ? hop
+      : Math.max(hop, Math.floor(usable / Math.max(1, maxFrames - 1)));
+
+  // Accumulator for circular mean on the 100-cent wrap
+  let sumCos = 0;
+  let sumSin = 0;
+  let weightSum = 0;
+  const centSamples: number[] = [];
+  const centWeights: number[] = [];
+
+  for (let off = 0; off + frameSize <= samples.length; off += stride) {
     const frame = samples.subarray(off, off + frameSize);
+    let frameEnergy = 0;
+    for (let i = 0; i < frame.length; i++) frameEnergy += frame[i]! * frame[i]!;
+    frameEnergy = Math.sqrt(frameEnergy / frame.length);
+    if (frameEnergy < 1e-5) continue;
+
     const mag = rfftMagnitudes(frame, window);
     const n = mag.length;
     const fftSize = n * 2;
+
+    // Adaptive peak floor from mid-band energy
+    let bandSum = 0;
+    let bandN = 0;
     for (let k = 2; k < n; k++) {
       const freq = (k * sampleRate) / fftSize;
-      if (freq < 100 || freq > 2000) continue;
+      if (freq < 80 || freq > 2500) continue;
+      bandSum += mag[k]!;
+      bandN++;
+    }
+    const bandMean = bandN ? bandSum / bandN : 0;
+    const peakFloor = Math.max(bandMean * 4, 1e-8);
+
+    for (let k = 2; k < n - 1; k++) {
       const amp = mag[k]!;
-      if (amp < (mag[k - 1] ?? 0) || amp < (mag[k + 1] ?? 0)) continue;
+      if (amp < peakFloor) continue;
+      if (amp < mag[k - 1]! || amp < mag[k + 1]!) continue;
+
+      const delta = parabolicPeakOffset(mag[k - 1]!, amp, mag[k + 1]!);
+      const freq = ((k + delta) * sampleRate) / fftSize;
+      if (freq < 90 || freq > 2200) continue;
+
       const midi = hzToMidi(freq);
+      if (!Number.isFinite(midi)) continue;
       const nearest = Math.round(midi);
-      const cents = (midi - nearest) * 100;
-      const bin = Math.round((cents + 50) / 5);
-      if (bin >= 0 && bin < 21) votes[bin]! += amp;
+      let cents = (midi - nearest) * 100; // (−50, +50]
+      if (cents > 50) cents -= 100;
+      if (cents <= -50) cents += 100;
+
+      // Prefer mid-band fundamentals; down-weight very high partials
+      const bandW = freq >= 120 && freq <= 1200 ? 1.4 : freq < 120 ? 0.7 : 0.55;
+      const w = amp * amp * bandW * (0.25 + frameEnergy);
+
+      const ang = (cents / 100) * 2 * Math.PI;
+      sumCos += w * Math.cos(ang);
+      sumSin += w * Math.sin(ang);
+      weightSum += w;
+      centSamples.push(cents);
+      centWeights.push(w);
     }
+    if (centSamples.length > 8000) break; // enough evidence
   }
-  let best = 10;
-  let bestV = -Infinity;
-  for (let i = 0; i < 21; i++) {
-    if (votes[i]! > bestV) {
-      bestV = votes[i]!;
-      best = i;
-    }
+
+  if (weightSum < 1e-12 || centSamples.length < 8) return 0;
+
+  let mean =
+    (Math.atan2(sumSin, sumCos) / (2 * Math.PI)) * 100; // (−50, +50]
+  if (mean > 50) mean -= 100;
+  if (mean <= -50) mean += 100;
+
+  // Outlier trim: drop samples >35¢ from circular mean, re-average
+  let c2 = 0;
+  let s2 = 0;
+  let w2 = 0;
+  for (let i = 0; i < centSamples.length; i++) {
+    let d = centSamples[i]! - mean;
+    if (d > 50) d -= 100;
+    if (d < -50) d += 100;
+    if (Math.abs(d) > 35) continue;
+    const ang = (centSamples[i]! / 100) * 2 * Math.PI;
+    const w = centWeights[i]!;
+    c2 += w * Math.cos(ang);
+    s2 += w * Math.sin(ang);
+    w2 += w;
   }
-  return best * 5 - 50;
+  if (w2 > 1e-12) {
+    mean = (Math.atan2(s2, c2) / (2 * Math.PI)) * 100;
+    if (mean > 50) mean -= 100;
+    if (mean <= -50) mean += 100;
+  }
+
+  // 1-cent resolution, clamp
+  const out = Math.round(mean);
+  return Math.max(-50, Math.min(50, out));
 }
 
 export function computeChromaFrames(
@@ -174,4 +256,14 @@ export function averageChroma(
   normalizeL2(chroma);
   normalizeL2(bassChroma);
   return { chroma, bassChroma, energy };
+}
+
+/** RMS of a mono buffer. */
+export function rmsEnergy(samples: ArrayLike<number>, start = 0, end?: number): number {
+  const n0 = Math.max(0, start);
+  const n1 = Math.min(samples.length, end ?? samples.length);
+  if (n1 <= n0) return 0;
+  let s = 0;
+  for (let i = n0; i < n1; i++) s += samples[i]! * samples[i]!;
+  return Math.sqrt(s / (n1 - n0));
 }

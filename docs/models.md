@@ -1,33 +1,68 @@
-# Model licenses (source separation)
+# Model licenses (source separation & precise mode)
 
-Chord AI’s core chord detector is original MIT code (no ML weights). Optional **source separation** improves real-recording accuracy by removing vocals/drums before chroma matching and using the bass stem for root emphasis.
+Chord AI’s core chord detector is original MIT code (no ML weights). The UI offers **快速** (default, no ML download) and **精準** modes. Precise mode runs **UMX-HQ** separation, then **Basic Pitch** transcription on `other`/`bass` stems, then note-based chord inference (no staff generation from notes — existing ABC staff UI unchanged).
 
-## HTDemucs (default separator)
+## UMX-HQ (separator)
 
 | Item | Detail |
 |---|---|
-| Architecture | Hybrid Transformer Demucs (`htdemucs`) — Meta / facebookresearch/demucs |
-| ONNX package | [`demucs-web`](https://github.com/timcsy/demucs-web) (MIT) |
-| Runtime | [`onnxruntime-web`](https://onnxruntime.ai/) (MIT) · WebGPU with WASM fallback |
-| Weights URL (lazy) | `https://huggingface.co/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx` (~172 MB) |
-| Upstream license | Demucs code **and** released pretrained models: **MIT** ([facebookresearch/demucs](https://github.com/facebookresearch/demucs/blob/main/LICENSE), HF `adefossez/HTDemucs-ft` `license: mit`) |
-| Stems | `drums`, `bass`, `other`, `vocals` |
+| Architecture | Open-Unmix **UMX-HQ** (half-width LSTM vs UMX-L) — [sigsep/open-unmix-pytorch](https://github.com/sigsep/open-unmix-pytorch) |
+| ONNX | Spectrogram nets only; host STFT/iSTFT in `@chord-ai/engine` (`n_fft=4096`, `hop=1024`, periodic Hann) |
+| Runtime | [`onnxruntime-web`](https://onnxruntime.ai/) / `onnxruntime-node` (MIT) · WASM EP (same-origin `/ort/`) |
+| Weights (lazy) | Vocals `edgetools/umx-hq` `vocals.onnx` (~17 MiB) + bass from export commit `2cc0d6a` (~17 MiB) → **~34 MiB total** |
+| Upstream license | **MIT** (Zenodo 3370489 / open-unmix-pytorch). UMX-L weights are **CC BY-NC-SA 4.0** — not used. |
+| Stems used | `vocals`, `bass`; `other` ≈ residual; `drums` empty |
 
-**Redistribution:** weights are **not** vendored in this git repo. Clients download on first use (browser Cache Storage / Node `CHORD_AI_MODEL_DIR`). For production you may mirror the same ONNX on Cloudflare R2 and set `VITE_DEMUCS_MODEL_URL`.
+**Redistribution:** weights are **not** vendored in git. Clients download on first precise-mode use (`CHORD_AI_MODEL_DIR` in Node). Mirror on R2 with `VITE_UMX_VOCALS_URL` / `VITE_UMX_BASS_URL`.
 
-**Chord pipeline use:**
+## Basic Pitch (precise-mode transcription)
 
-- Chroma / templates ← `bass + other + light drums` (vocals excluded)
-- Bass chroma / root prior ← `bass` stem
+| Item | Detail |
+|---|---|
+| Model | Spotify **Basic Pitch** ICASSP 2022 ONNX (`nmp.onnx`, ~226 KiB) |
+| Package | [`@audio/neural-transcribe`](https://www.npmjs.com/package/@audio/neural-transcribe) (Apache-2.0 port) |
+| Upstream | [spotify/basic-pitch](https://github.com/spotify/basic-pitch) **Apache-2.0** |
+| Stems transcribed | `other` (accompaniment), `bass` |
+| Cache | Same Cache Storage as UMX (`chord-ai-ml-v2`); warm ORT session in `preciseWorker` |
+
+## ORT wasm (same-origin)
+
+The separate / precise workers import `onnxruntime-web/wasm` (non-jsep) and load runtime files **same-origin** from `/ort/` (~14 MiB). Files are synced by `npm run sync:ort` **and** by the Vite `ensureOrtRuntime` plugin on every `vite` start. `numThreads` is forced to `1` under COOP/COEP. JSEP/WebGPU builds are not shipped (Workers 25 MiB limit).
+
+**Client persistence:** ONNX model bytes (UMX + Basic Pitch) in **Cache Storage** (`chord-ai-ml-v2`). ORT runtime files are **not** Cache-Storaged.
+
+## Precise chord pipeline
+
+1. UMX-HQ → stems; soft vocal residual subtract on instrumental  
+2. Basic Pitch → note events on `other` + `bass` (vocal-correlated notes down-weighted)  
+3. Beat grid → **harmonic-novelty downbeat** (training-free; optional local re-phase ~8 bars)  
+4. **NNLS approximate-note-transcription chroma** (Mauch & Dixon ISMIR 2010, independent MIT impl.): log-freq (3 bins/semitone) → tuning → spectral standardisation → NNLS vs harmonic note dictionary → treble + bass chroma per beat  
+5. Fuse NNLS treble/bass with Basic Pitch PC histogram (reliability-weighted); soft drone discount with novelty keep for sus/7 tones; size-normalised template presence  
+6. **Metric-position HMM/Viterbi**: change preferred on beat 1, some on beat 3, rare on 2/4; key prior; hand-set parameters only  
+7. Merge identical labels; full quality vocabulary + slash chords (no staff from notes)  
+
+Not derived from Chordino / nnls-chroma (GPL).  
+
+## Accuracy vs size
+
+| Option | Size | Role |
+|---|---:|---|
+| 快速 (default) | 0 | Full-mix chroma |
+| UMX-HQ chroma | ~34 MiB | Separation + chroma templates |
+| **精準 (UMX + Basic Pitch)** | **~34.2 MiB** | Note-based chords |
+| HTDemucs ONNX (removed) | ~172 MiB | Too large for frontend default |
+
+See measured fast vs precise numbers in [`docs/validation.md`](./validation.md).
 
 ## Alternatives considered
 
 | Model | Why not default |
 |---|---|
-| Open-Unmix **UMX-HQ** (MIT, Zenodo) | Smaller vocals ONNX (~36 MB) available; needs custom STFT/Wiener host code and separate bass ONNX for 4-stem parity |
-| Open-Unmix **UMX-L** | Weights **CC BY-NC-SA 4.0** — not suitable for unrestricted MIT redistribution |
-| UVR MDX-Net Voc_FT | Strong vocal remover (~65 MB, MIT claimed) but only 2-stem (no dedicated bass) |
+| HTDemucs (`demucs-web`) | ~172 MiB ONNX; also pulled ORT jsep wasm (~28 MiB) into Pages assets |
+| Open-Unmix **UMX-L** | Weights **CC BY-NC-SA 4.0** |
+| MixDirective UMX-HQ single-stem ONNX | ~35 MiB **per** stem — vocals+bass would exceed 40 MiB |
+| `@spotify/basic-pitch` (tfjs) | Heavier TF.js runtime; ONNX port fits existing ORT stack |
 
 ## Privacy
 
-Separation and chord analysis run **entirely in the browser (or local Node harness)**. Audio is never uploaded. Only the static ONNX weight file is fetched from the model host / R2.
+Separation, transcription, and chord analysis run **entirely in the browser (or local Node harness)**. Audio is never uploaded. Only static ONNX weights (and same-origin ORT wasm) are fetched.

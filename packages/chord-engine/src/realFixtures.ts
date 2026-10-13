@@ -13,8 +13,10 @@ export interface RealSongReference {
    * against the recording (avoids brittle hand-timed section maps).
    */
   loops: Array<{
-    /** Chord per bar (4 beats) in SOUNDING key */
+    /** Chord per slot (default one 4-beat bar) in SOUNDING key */
     bars: string[];
+    /** Beats per chord slot (default 4). Wonderwall verse = 2. */
+    beatsPerChord?: number;
     /** Approximate start of this material in the song (ms) */
     fromMs: number;
     /** Approximate end (ms); clipped to audio duration at score time */
@@ -23,14 +25,15 @@ export interface RealSongReference {
   segmentsMs: Array<{ chord: string; startMs: number; endMs: number }>;
 }
 
-function expandLoop(
+export function expandLoop(
   bpm: number,
   fromMs: number,
   toMs: number,
   bars: string[],
   phaseBars = 0,
+  beatsPerChord = 4,
 ): Array<{ chord: string; startMs: number; endMs: number }> {
-  const barMs = (4 * 60000) / bpm;
+  const barMs = (beatsPerChord * 60000) / bpm;
   const out: Array<{ chord: string; startMs: number; endMs: number }> = [];
   let t = fromMs + phaseBars * barMs;
   // rewind to cover fromMs
@@ -56,7 +59,7 @@ function buildSegments(
 ): Array<{ chord: string; startMs: number; endMs: number }> {
   const segs: Array<{ chord: string; startMs: number; endMs: number }> = [];
   for (const loop of loops) {
-    segs.push(...expandLoop(bpm, loop.fromMs, loop.toMs, loop.bars, 0));
+    segs.push(...expandLoop(bpm, loop.fromMs, loop.toMs, loop.bars, 0, loop.beatsPerChord));
   }
   return segs;
 }
@@ -90,7 +93,11 @@ function heyJudeRef(): RealSongReference {
 }
 
 /**
- * Wonderwall — UG capo 2 → sounding F#m7 A Esus4 B7sus4 (1 bar each).
+ * Wonderwall — UG capo 2 → sounding F#m7 A Esus4 B7sus4, **2 beats each**
+ * (half-bar; confirmed by ear 2026-10-13 — the earlier 1-bar-per-chord
+ * reference was wrong and depressed all Wonderwall scores before that date).
+ * Chorus timing is not yet verified by ear (kept at 1 bar per chord; only
+ * matters beyond the first 60 s).
  * Chorus material often centers on D / F#m / A (Cadd9 Em7 G shapes +2).
  */
 function wonderwallRef(): RealSongReference {
@@ -98,9 +105,9 @@ function wonderwallRef(): RealSongReference {
   const verse = ['F#m7', 'A', 'Esus4', 'B7sus4'];
   const chorus = ['D', 'F#m7', 'A', 'F#m7'];
   const loops: RealSongReference['loops'] = [
-    { bars: verse, fromMs: 0, toMs: 150000 },
+    { bars: verse, fromMs: 0, toMs: 150000, beatsPerChord: 2 },
     { bars: chorus, fromMs: 150000, toMs: 210000 },
-    { bars: verse, fromMs: 210000, toMs: 250000 },
+    { bars: verse, fromMs: 210000, toMs: 250000, beatsPerChord: 2 },
     { bars: chorus, fromMs: 250000, toMs: 290000 },
   ];
   return {
@@ -111,7 +118,7 @@ function wonderwallRef(): RealSongReference {
     key: 'F#m',
     bpm,
     source:
-      'Ultimate Guitar Wonderwall capo 2; sounding F#m7–A–Esus4–B7sus4 (verse) / D–F#m7–A (chorus). Phase-aligned. Local audio only.',
+      'Audio: official Oasis "Wonderwall (Remastered)" https://www.youtube.com/watch?v=FVdjZYfDuLE (4:19, music from 0 s; replaces an earlier upload with ~16 s near-silent lead-in). Reference starts at 0 s. 0:36–0:44 detected Em/D/G — unverified by ear. Ultimate Guitar Wonderwall capo 2; sounding F#m7–A–Esus4–B7sus4 (verse, 2 beats per chord) / D–F#m7–A (chorus). Phase-aligned. Local audio only.',
     loops,
     segmentsMs: buildSegments(bpm, loops),
   };
@@ -132,7 +139,9 @@ export function phaseAlignedSegments(
   for (let phase = 0; phase < maxBars; phase++) {
     const segs: Array<{ chord: string; startMs: number; endMs: number }> = [];
     for (const loop of ref.loops) {
-      segs.push(...expandLoop(ref.bpm, loop.fromMs, loop.toMs, loop.bars, phase % loop.bars.length));
+      segs.push(
+        ...expandLoop(ref.bpm, loop.fromMs, loop.toMs, loop.bars, phase % loop.bars.length, loop.beatsPerChord),
+      );
     }
     const s = scoreFn(segs);
     if (s > best) {

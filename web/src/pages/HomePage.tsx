@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   applySimplify,
   suggestCapo,
@@ -7,11 +7,32 @@ import {
   type ChordEvent,
   type DetectionResult,
 } from '@chord-ai/engine';
-import { analyzeAudio, decodeFile, recordMicrophone } from '../lib/audio';
-import { defaultSeparationEnabled } from '../lib/capabilities';
+import {
+  analyzeAudio,
+  clearModelCache,
+  decodeFile,
+  getModelCacheStatus,
+  prefetchModels,
+  recordMicrophone,
+  type DetectMode,
+  type ModelCacheStatus,
+  type SeparateSources,
+} from '../lib/audio';
+import { defaultDetectMode } from '../lib/capabilities';
 import { publishSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
+import { PlaybackControls } from '../components/PlaybackControls';
+import { AccompanimentChart } from '../components/AccompanimentChart';
+import type { PlayInstrument } from '../lib/chordVoicing';
+import type { StrumMode } from '../lib/chordSynth';
+import { getChordSynth } from '../lib/chordSynth';
+import {
+  playProgression,
+  playSingleChord,
+  type ProgressionHandle,
+} from '../lib/progressionPlayer';
+import { downloadMidi } from '../lib/midiExport';
 
 const COMMON = [
   'C', 'Cm', 'C7', 'Cmaj7', 'D', 'Dm', 'D7', 'E', 'Em', 'E7',
@@ -31,23 +52,54 @@ export function HomePage() {
   const [simplify, setSimplify] = useState(0.45);
   const [transpose, setTranspose] = useState(0);
   const [instrument, setInstrument] = useState<'guitar' | 'ukulele'>('guitar');
+  const [playInstrument, setPlayInstrument] = useState<PlayInstrument>('guitar');
+  const [strum, setStrum] = useState<StrumMode>('strum');
+  const [volume, setVolume] = useState(0.7);
+  const [playingIndex, setPlayingIndex] = useState<number | null>(null);
+  const [progressionPlaying, setProgressionPlaying] = useState(false);
+  const progRef = useRef<ProgressionHandle | null>(null);
   const [selected, setSelected] = useState(0);
   const [lyricsText, setLyricsText] = useState('');
   const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('');
   const [editLink, setEditLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [separate, setSeparate] = useState(false);
-  const [sepHint, setSepHint] = useState('偵測裝置能力中…');
+  const [mode, setMode] = useState<DetectMode>('fast');
+  const [modeHint, setModeHint] = useState('偵測裝置能力中…');
   const [webgpu, setWebgpu] = useState(false);
+  const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
+  const [lastSources, setLastSources] = useState<SeparateSources | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
 
   useEffect(() => {
-    void defaultSeparationEnabled().then((c) => {
-      setSeparate(c.enabled);
-      setWebgpu(c.webgpu);
-      setSepHint(c.reason);
-    });
+    return () => {
+      progRef.current?.stop();
+      getChordSynth().stopAll();
+    };
   }, []);
+
+  async function refreshCacheStatus() {
+    try {
+      const s = await getModelCacheStatus({ useBass: true });
+      setCacheStatus(s);
+    } catch {
+      /* worker may still be booting */
+    }
+  }
+
+  useEffect(() => {
+    void defaultDetectMode().then((c) => {
+      setMode(c.mode);
+      setWebgpu(c.webgpu);
+      setModeHint(c.reason);
+    });
+    void refreshCacheStatus();
+  }, []);
+
+  useEffect(() => {
+    if (mode !== 'precise') return;
+    void refreshCacheStatus();
+  }, [mode]);
 
   const view = useMemo(() => {
     if (!raw) return null;
@@ -70,22 +122,101 @@ export function HomePage() {
     return [...new Set(view.chords.map((c) => c.chord))].slice(0, 12);
   }, [view]);
 
+  const lyricLines = useMemo(
+    () => lyricsText.split(/\n/).map((t) => t.trim()).filter(Boolean),
+    [lyricsText],
+  );
+
+  const playingLyricLine = useMemo(() => {
+    if (playingIndex == null || !view || !lyricLines.length) return null;
+    const c = view.chords[playingIndex];
+    if (!c) return null;
+    const total = view.chords[view.chords.length - 1]!.endMs || 1;
+    const idx = Math.min(
+      lyricLines.length - 1,
+      Math.max(0, Math.floor((c.tMs / total) * lyricLines.length)),
+    );
+    return idx;
+  }, [playingIndex, view, lyricLines]);
+
+  async function onChordChipClick(i: number) {
+    if (!view) return;
+    setSelected(i);
+    try {
+      await playSingleChord(view.chords[i]!.chord, {
+        instrument: playInstrument,
+        strum: playInstrument === 'piano' ? 'block' : strum,
+        volume,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function onPlayProgression() {
+    if (!view?.chords.length) return;
+    progRef.current?.stop();
+    setProgressionPlaying(true);
+    try {
+      const handle = await playProgression(view.chords, {
+        instrument: playInstrument,
+        strum: playInstrument === 'piano' ? 'block' : strum,
+        volume,
+        onIndex: (idx) => {
+          setPlayingIndex(idx);
+          if (idx != null) setSelected(idx);
+        },
+        onDone: () => {
+          setProgressionPlaying(false);
+          setPlayingIndex(null);
+          progRef.current = null;
+        },
+      });
+      progRef.current = handle;
+    } catch (e) {
+      setProgressionPlaying(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function onStopProgression() {
+    progRef.current?.stop();
+    progRef.current = null;
+    setProgressionPlaying(false);
+    setPlayingIndex(null);
+  }
+
+  function onExportMidi() {
+    if (!view?.chords.length) return;
+    downloadMidi(view.chords, {
+      bpm: view.bpm,
+      instrument: playInstrument,
+      title: title.trim() || 'chord-ai',
+      filename: `${(title.trim() || 'chords').replace(/\s+/g, '_')}.mid`,
+    });
+  }
+
+  function onPlayInstrumentChange(v: PlayInstrument) {
+    setPlayInstrument(v);
+    if (v === 'guitar' || v === 'ukulele') setInstrument(v);
+  }
+
   async function runDetect(samples: Float32Array, sampleRate: number) {
     setBusy(true);
     setError(null);
     setProgress(5);
     setStatus(
-      separate
-        ? '音源分離（HTDemucs，音訊不離開此裝置）…'
-        : '正在分析和弦（瀏覽器內處理）…',
+      mode === 'precise'
+        ? '精準模式：分離 → Basic Pitch → 音符和弦（音訊不離開此裝置）…'
+        : '快速模式：正在分析和弦（瀏覽器內處理）…',
     );
     try {
       const result = await analyzeAudio(samples, sampleRate, {
-        separate,
+        mode,
         preferWebGpu: webgpu,
         detect: {
           simplifyLevel: simplify,
-          suppressDrone: !separate,
+          suppressDrone: mode === 'fast',
         },
         onProgress: (p, detail) => {
           setProgress(Math.round(p * 100));
@@ -96,11 +227,33 @@ export function HomePage() {
       setRaw(result);
       setTranspose(0);
       setSelected(0);
-      setStatus(
-        `完成：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
-          (result.usedSeparation ? '（已做人聲／鼓分離）' : '。'),
-      );
+      if (result.separateSources) setLastSources(result.separateSources);
+      void refreshCacheStatus();
+      const srcNote =
+        result.separateSources &&
+        result.separateSources.vocals !== 'network' &&
+        result.separateSources.bass !== 'network'
+          ? '；模型來自本機快取'
+          : result.separateSources
+            ? '；模型已寫入本機快取'
+            : '';
+      const modeLabel = result.mode === 'precise' ? '精準' : '快速';
+      if (result.separationError) {
+        setError(`精準模式部分失敗，已改用備援：${result.separationError}`);
+        setStatus(
+          `完成（${modeLabel}/備援）：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊${srcNote}`,
+        );
+      } else {
+        setStatus(
+          `完成（${modeLabel}）：調性 ${result.key}、約 ${result.bpm} BPM、${result.chords.length} 個和弦區塊` +
+            (result.usedSeparation ? srcNote : '。') +
+            (result.noteCounts
+              ? `；音符 other=${result.noteCounts.other} bass=${result.noteCounts.bass}`
+              : ''),
+        );
+      }
     } catch (e) {
+      setProgress(100);
       setError(e instanceof Error ? e.message : String(e));
       setStatus('分析失敗');
     } finally {
@@ -226,8 +379,6 @@ export function HomePage() {
     }
   }
 
-  const lyricLines = lyricsText.split(/\n/).map((t) => t.trim()).filter(Boolean);
-
   return (
     <>
       <section className="hero">
@@ -259,30 +410,110 @@ export function HomePage() {
               />
             </label>
           </div>
-          <label
+          <div
             style={{
-              display: 'flex',
-              gap: '0.5rem',
-              alignItems: 'flex-start',
               marginTop: '1rem',
               maxWidth: '36rem',
               fontSize: '0.92rem',
               color: 'var(--ink-soft)',
             }}
           >
-            <input
-              type="checkbox"
-              checked={separate}
-              disabled={busy}
-              onChange={(e) => setSeparate(e.target.checked)}
-              style={{ marginTop: '0.2rem' }}
-            />
-            <span>
-              <strong style={{ color: 'var(--ink)' }}>音源分離（HTDemucs）</strong>
-              — 先去掉人聲／鼓再辨識和弦，並用貝斯軌強化根音。首次需下載約 172MB
-              模型（可改託管於 R2）。{sepHint}
+            <div style={{ marginBottom: '0.35rem', color: 'var(--ink)' }}>
+              <strong>辨識模式</strong>
+            </div>
+            <div
+              role="radiogroup"
+              aria-label="辨識模式"
+              style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}
+            >
+              <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="detect-mode"
+                  checked={mode === 'fast'}
+                  disabled={busy || cacheBusy}
+                  onChange={() => setMode('fast')}
+                />
+                快速
+              </label>
+              <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="detect-mode"
+                  checked={mode === 'precise'}
+                  disabled={busy || cacheBusy}
+                  onChange={() => {
+                    setMode('precise');
+                    setCacheBusy(true);
+                    void prefetchModels({
+                      preferWebGpu: webgpu,
+                      useBass: true,
+                      onProgress: (p, detail) => {
+                        setProgress(Math.round(p * 100));
+                        setStatus(detail);
+                      },
+                    })
+                      .then(() => refreshCacheStatus())
+                      .catch((err) =>
+                        setError(err instanceof Error ? err.message : String(err)),
+                      )
+                      .finally(() => setCacheBusy(false));
+                  }}
+                />
+                精準
+              </label>
+            </div>
+            <p style={{ margin: '0.45rem 0 0', lineHeight: 1.45 }}>
+              {mode === 'fast'
+                ? '快速：完整混音色度比對（無需下載模型）。'
+                : '精準：UMX-HQ 分離 → Basic Pitch 轉錄伴奏/貝斯 → 音符和弦推斷（約 34MB + 0.2MB，可快取；較慢）。'}{' '}
+              {modeHint}
+            </p>
+          </div>
+          <div
+            style={{
+              marginTop: '0.65rem',
+              maxWidth: '36rem',
+              fontSize: '0.85rem',
+              color: 'var(--ink-soft)',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.5rem',
+              alignItems: 'center',
+            }}
+          >
+            <span data-testid="model-cache-status">
+              模型快取：
+              {cacheStatus == null
+                ? '檢查中…'
+                : cacheStatus.allCached
+                  ? `已快取（${(cacheStatus.totalBytes / 1e6).toFixed(1)} MB）`
+                  : '尚未下載／部分缺失'}
+              {lastSources
+                ? ` · 上次：vocals=${lastSources.vocals}, bass=${lastSources.bass}, ort=${lastSources.ort}`
+                : ''}
             </span>
-          </label>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ fontSize: '0.8rem', padding: '0.25rem 0.6rem' }}
+              disabled={busy || cacheBusy}
+              data-testid="clear-model-cache"
+              onClick={() => {
+                setCacheBusy(true);
+                void clearModelCache()
+                  .then(() => {
+                    setLastSources(null);
+                    setStatus('已清除模型快取（含 ORT wasm）');
+                    return refreshCacheStatus();
+                  })
+                  .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                  .finally(() => setCacheBusy(false));
+              }}
+            >
+              清除模型快取
+            </button>
+          </div>
         </div>
         <div className="hero-visual" aria-hidden>
           <div className="wave" />
@@ -302,7 +533,7 @@ export function HomePage() {
           <section className="panel" style={{ marginTop: '1rem' }}>
             <h2>和弦時間軸</h2>
             <p className="lead">
-              調性 {view.key} · {view.bpm} BPM · 點一下即可改和弦
+              調性 {view.key} · {view.bpm} BPM · 點和弦可試聽（已套用移調）· 可播放整段進行
             </p>
             <div className="controls">
               <label>
@@ -337,16 +568,36 @@ export function HomePage() {
                 </div>
               </label>
               <label>
-                樂器
+                按法圖樂器
                 <select
                   value={instrument}
-                  onChange={(e) => setInstrument(e.target.value as 'guitar' | 'ukulele')}
+                  onChange={(e) => {
+                    const v = e.target.value as 'guitar' | 'ukulele';
+                    setInstrument(v);
+                    setPlayInstrument(v);
+                  }}
                 >
                   <option value="guitar">吉他</option>
                   <option value="ukulele">烏克麗麗</option>
                 </select>
               </label>
             </div>
+            <PlaybackControls
+              playInstrument={playInstrument}
+              onPlayInstrument={onPlayInstrumentChange}
+              strum={strum}
+              onStrum={setStrum}
+              volume={volume}
+              onVolume={(v) => {
+                setVolume(v);
+                getChordSynth().setVolume(v);
+              }}
+              playing={progressionPlaying}
+              onPlayProgression={() => void onPlayProgression()}
+              onStop={onStopProgression}
+              onExportMidi={onExportMidi}
+              disabled={busy}
+            />
             {capo && (
               <p className="status">
                 Capo 建議：{capo.summary}
@@ -358,8 +609,9 @@ export function HomePage() {
                 <button
                   key={`${c.tMs}-${i}`}
                   type="button"
-                  className={`chord-chip ${selected === i ? 'active' : ''}`}
-                  onClick={() => setSelected(i)}
+                  className={`chord-chip ${selected === i ? 'active' : ''} ${playingIndex === i ? 'playing' : ''}`}
+                  onClick={() => void onChordChipClick(i)}
+                  title="點擊試聽此和弦"
                 >
                   {c.chord}
                   <span className="t">{(c.tMs / 1000).toFixed(1)}s</span>
@@ -385,6 +637,8 @@ export function HomePage() {
               </label>
             </div>
           </section>
+
+          {raw && <AccompanimentChart result={raw} lyricLines={lyricLines} volume={volume} />}
 
           <section className="grid-2" style={{ marginTop: '1rem' }}>
             <div className="panel">
@@ -417,7 +671,10 @@ export function HomePage() {
             {lyricLines.length > 0 && (
               <div className="lyrics">
                 {lyricLines.map((line, i) => (
-                  <div className="lyric-line" key={i}>
+                  <div
+                    className={`lyric-line ${playingLyricLine === i ? 'playing' : ''}`}
+                    key={i}
+                  >
                     <div className="lyric-chords">
                       {chordsForLine(view.chords, i, lyricLines.length).map((c, j) => (
                         <span key={j}>{c.chord}</span>

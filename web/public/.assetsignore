@@ -1,0 +1,4 @@
+# Oversized ORT variants (>25 MiB Workers limit). Keep /ort/ort-wasm-simd-threaded.wasm (~14 MiB).
+**/*jsep*.wasm
+**/*asyncify*.wasm
+**/*jspi*.wasm

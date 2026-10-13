@@ -14,4 +14,12 @@ export * from './accuracy.js';
 export * from './fixtures.js';
 export * from './realFixtures.js';
 export * from './separate.js';
+export * from './stft.js';
+export * from './umx.js';
+export * from './preciseDetect.js';
+export * from './downbeat.js';
+export * from './nnlsChroma.js';
+export * from './basicPitch.js';
 // loadAudio is Node/ffmpeg-only — import from './loadAudio.js' in scripts, not the browser bundle
+export * from './guitarShapes.js';
+export * from './accompaniment.js';

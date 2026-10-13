@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node ../scripts/ensure-web-dist.mjs",
     "dev": "cd .. && wrangler dev --local --persist-to worker/.wrangler/state",
     "build": "echo \"worker bundled by wrangler\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"

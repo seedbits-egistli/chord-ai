@@ -294,10 +294,29 @@ textarea {
   transform: translateY(-1px);
 }
 
+.chord-chip.playing {
+  border-color: var(--coral, #c45c26);
+  background: rgba(196, 92, 38, 0.12);
+  box-shadow: 0 0 0 2px rgba(196, 92, 38, 0.25);
+  transform: translateY(-1px) scale(1.03);
+}
+
 .chord-chip .t {
   display: block;
   font-size: 0.65rem;
   color: var(--ink-soft);
+}
+
+.playback-controls {
+  padding: 0.5rem 0 0.25rem;
+  border-top: 1px dashed var(--line);
+  margin-top: 0.5rem;
+}
+
+.lyric-line.playing {
+  background: rgba(15, 76, 92, 0.08);
+  border-radius: 8px;
+  outline: 1px solid rgba(15, 76, 92, 0.2);
 }
 
 .lyrics {
@@ -427,3 +446,22 @@ textarea {
     filter: saturate(1.08);
   }
 }
+
+/* ---- 吉他伴奏譜 ---- */
+.accomp .seg { display: flex; gap: 4px; }
+.accomp .strum { font-size: 1.05rem; letter-spacing: 0.08em; }
+.shape-card { margin: 0; display: inline-flex; flex-direction: column; align-items: center; padding: 0.4rem; }
+.shape-card figcaption { font-size: 0.85rem; text-align: center; }
+.shape-card figcaption .t { display: block; opacity: 0.65; font-size: 0.75rem; }
+.accomp-lines, .accomp-lyrics { display: flex; flex-direction: column; gap: 6px; margin-top: 0.75rem; }
+.accomp-grid { display: flex; gap: 0; align-items: stretch; }
+.accomp-barno { width: 2.2rem; opacity: 0.5; font-size: 0.75rem; padding-top: 0.6rem; }
+.accomp-bar {
+  flex: 1 1 0; display: flex; min-height: 2.4rem; border: none; border-left: 2px solid currentColor;
+  background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; padding: 0.4rem 0.5rem;
+}
+.accomp-grid .accomp-bar:last-child { border-right: 2px solid currentColor; }
+.accomp-bar:hover { background: rgba(127, 127, 127, 0.12); }
+.accomp-bar.playing { background: rgba(255, 196, 0, 0.28); }
+.accomp-chord { text-align: left; }
+.accomp-lyric-text { padding: 0.15rem 0 0.5rem 0.5rem; opacity: 0.9; }
