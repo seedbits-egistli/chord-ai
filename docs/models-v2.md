@@ -44,7 +44,14 @@ for f in beat-this-small.onnx btc-majmin.onnx btc-large.onnx wav2vec2-base-960h-
 done
 npx wrangler r2 object put chord-ai-models/v2/wav2vec2-labels.json --file models-v2/wav2vec2-labels.json \
   --content-type application/json --cache-control "public, max-age=31536000, immutable" --remote
+# 選用：WebGPU 版 ORT wasm（26.8 MB，超過 Pages 25 MiB 上限，所以放 R2；.mjs 仍在網站 /ort/）
+npx wrangler r2 object put chord-ai-models/v2/ort/ort-wasm-simd-threaded.asyncify.wasm \
+  --file node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm \
+  --content-type application/wasm --cache-control "public, max-age=31536000, immutable" --remote
 ```
+
+執行設定：多執行緒 wasm 預設開啟（crossOriginIsolated 時 4 執行緒，`?ort_threads=N` 可覆寫）。
+WebGPU 預設關閉（未在實體 GPU 驗證）：`?ort_ep=webgpu` 或建置時 `VITE_ORT_WEBGPU=1` 開啟，無 adapter 時自動退回 wasm。
 
 Bucket 要開 public（custom domain 或 r2.dev），並設定 CORS（網站有 COOP/COEP credentialless，跨網域 fetch 需要 CORS）：
 ```json

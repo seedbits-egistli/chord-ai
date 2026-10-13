@@ -13,7 +13,7 @@ const CHROME = process.env.CHROME_PATH || '/usr/local/bin/google-chrome';
 const browser = await chromium.launch({
   executablePath: CHROME,
   headless: true,
-  args: ['--autoplay-policy=no-user-gesture-required', '--enable-unsafe-swiftshader'],
+  args: ['--autoplay-policy=no-user-gesture-required', '--enable-unsafe-swiftshader', ...(process.env.WEBGPU ? ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=swiftshader', '--use-webgpu-adapter=swiftshader'] : [])],
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const log = [];

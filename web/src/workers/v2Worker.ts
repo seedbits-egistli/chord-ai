@@ -3,7 +3,7 @@
  * v2 analysis worker: Beat This! → BTC chords → (optional) wav2vec2 lyric alignment.
  * All inference is local (onnxruntime-web, wasm EP); models are fetched once and kept in Cache Storage.
  */
-import * as ort from 'onnxruntime-web/wasm';
+import * as ortWasm from 'onnxruntime-web/wasm';
 import {
   BTC_NORM,
   alignLyrics,
@@ -16,7 +16,7 @@ import {
 } from '@chord-ai/engine';
 import { readOrtWorkerConfig } from '../lib/ortConfig';
 import { getCachedArrayBuffer, putArrayBuffer } from '../lib/assetCache';
-import { V2_MODELS, modelUrl, type ModelSpec } from '../lib/modelsV2';
+import { MODEL_BASE_URL, V2_MODELS, modelUrl, type ModelSpec } from '../lib/modelsV2';
 
 export type V2Stage = 'download' | 'separate' | 'beats' | 'chords' | 'align';
 export type V2Request =
@@ -33,15 +33,45 @@ export type V2Response =
   | { id: number; type: 'error'; error: string };
 
 const post = (m: V2Response) => (self as unknown as Worker).postMessage(m);
-ort.env.wasm.wasmPaths = `${self.location.origin}/ort/`;
+const dbg = (...a: unknown[]) => console.log('[v2w]', (performance.now() / 1000).toFixed(1), ...a);
 const cfg = readOrtWorkerConfig(self.name);
-ort.env.wasm.numThreads = cfg.threads;
-const dbg = (...a: unknown[]) => console.log('[v2w]', ((performance.now()) / 1000).toFixed(1), ...a);
-dbg('cfg', JSON.stringify(cfg), 'isolated', (self as unknown as { crossOriginIsolated: boolean }).crossOriginIsolated);
-ort.env.wasm.proxy = false;
+type Ort = typeof ortWasm;
+let ort: Ort = ortWasm;
+let eps: string[] = ['wasm'];
+let ortInit: Promise<void> | null = null;
+/**
+ * Pick the execution provider once per worker. WebGPU (opt-in: ?ort_ep=webgpu, or ep=auto with VITE_ORT_WEBGPU=1,
+ * only when an adapter exists) loads ORT's webgpu build. Its 26.8 MB asyncify wasm exceeds the Pages 25 MiB limit,
+ * so the wasm binary is fetched from MODEL_BASE_URL/ort/ (R2) while the small .mjs glue stays same-origin in /ort/.
+ */
+function initOrt(): Promise<void> {
+  ortInit ??= (async () => {
+    const wantGpu = cfg.ep === 'webgpu' || (cfg.ep === 'auto' && import.meta.env.VITE_ORT_WEBGPU === '1');
+    let gpuOk = false;
+    if (wantGpu && 'gpu' in navigator) {
+      try {
+        gpuOk = !!(await (navigator as unknown as { gpu: { requestAdapter(): Promise<unknown> } }).gpu.requestAdapter());
+      } catch { gpuOk = false; }
+    }
+    if (gpuOk) {
+      ort = (await import('onnxruntime-web/webgpu')) as unknown as Ort;
+      ort.env.wasm.wasmPaths = {
+        mjs: `${self.location.origin}/ort/ort-wasm-simd-threaded.asyncify.mjs`,
+        wasm: new URL(`${MODEL_BASE_URL}/ort/ort-wasm-simd-threaded.asyncify.wasm`, self.location.origin).href,
+      };
+      eps = ['webgpu', 'wasm'];
+    } else {
+      ort.env.wasm.wasmPaths = `${self.location.origin}/ort/`;
+    }
+    ort.env.wasm.numThreads = cfg.threads;
+    ort.env.wasm.proxy = false;
+    dbg('ep', eps.join(','), 'threads', cfg.threads, wantGpu && !gpuOk ? '(no WebGPU adapter -> wasm)' : '');
+  })();
+  return ortInit;
+}
 
 const buffers = new Map<string, ArrayBuffer>();
-const sessions = new Map<string, ort.InferenceSession>();
+const sessions = new Map<string, ortWasm.InferenceSession>();
 
 async function fetchModel(id: number, m: ModelSpec, acc: { loaded: number; total: number }): Promise<ArrayBuffer> {
   const url = modelUrl(m);
@@ -83,14 +113,15 @@ async function session(m: ModelSpec): Promise<OnnxRun> {
   const url = modelUrl(m);
   let s = sessions.get(url);
   if (!s) {
-    dbg('create', m.label);
-    s = await ort.InferenceSession.create(new Uint8Array(buffers.get(url)!), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    await initOrt();
+    const t = performance.now();
+    s = await ort.InferenceSession.create(new Uint8Array(buffers.get(url)!), { executionProviders: eps, graphOptimizationLevel: 'all' });
     sessions.set(url, s);
-    dbg('created', m.label);
+    dbg('session', m.label, `${(performance.now() - t).toFixed(0)} ms`);
   }
   const sess = s;
   return async (feeds) => {
-    const f: Record<string, ort.Tensor> = {};
+    const f: Record<string, ortWasm.Tensor> = {};
     for (const [k, v] of Object.entries(feeds)) f[k] = new ort.Tensor('float32', v.data, v.dims as number[]);
     const o = await sess.run(f);
     const r: Record<string, { data: Float32Array; dims: readonly number[] }> = {};

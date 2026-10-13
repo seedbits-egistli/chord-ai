@@ -152,7 +152,7 @@ function serveLocalModels(): Plugin {
           res.end(`model not found: ${name} (put files in ${dir})`);
           return;
         }
-        res.setHeader('Content-Type', name.endsWith('.json') ? 'application/json' : 'application/octet-stream');
+        res.setHeader('Content-Type', name.endsWith('.json') ? 'application/json' : name.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream');
         res.setHeader('Content-Length', String(statSync(file).size));
         res.setHeader('Cache-Control', 'no-cache');
         createReadStream(file).pipe(res);
