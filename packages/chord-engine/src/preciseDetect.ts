@@ -69,6 +69,10 @@ export interface PreciseDetectOptions extends DetectOptions {
   vocalResidual?: number;
   /** Optional mono vocal stem (same rate/length as beat audio) for leakage control. */
   vocalSamples?: Float32Array;
+  /** Optional mono bass stem (same rate as beat audio) for per-beat bass reliability. */
+  bassSamples?: Float32Array;
+  /** Highest MIDI note accepted as a real bass-stem root (higher = leaked instrument). Default 52 (E3). */
+  bassMaxMidi?: number;
   /** @deprecated Prefer metricDecode; kept for callers that passed halfBar. */
   halfBar?: boolean;
 }
@@ -135,6 +139,36 @@ export function lowestBassPc(
     midi: best.midi,
     weight: Math.max(0, overlap) * (0.25 + 0.75 * best.velocity),
   };
+}
+
+/** Per-window RMS of a mono signal. */
+function windowRms(x: Float32Array, sr: number, windows: Array<{ startMs: number; endMs: number }>): Float32Array {
+  const out = new Float32Array(windows.length);
+  for (let i = 0; i < windows.length; i++) {
+    const a = Math.max(0, Math.floor((windows[i]!.startMs / 1000) * sr));
+    const b = Math.min(x.length, Math.floor((windows[i]!.endMs / 1000) * sr));
+    let s = 0;
+    for (let k = a; k < b; k++) s += x[k]! * x[k]!;
+    out[i] = b > a ? Math.sqrt(s / (b - a)) : 0;
+  }
+  return out;
+}
+
+/**
+ * Narrow-register / re-entrant instrument detector (ukulele, high-capo guitar):
+ * accompaniment notes around the window have no low register and a small span,
+ * so their "lowest note" says little about the root.
+ */
+export function isNarrowRegister(notes: NoteEvent[], startSec: number, endSec: number): boolean {
+  const hits = notesInWindow(notes, startSec, endSec);
+  if (hits.length < 3) return false;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const n of hits) {
+    lo = Math.min(lo, n.midi);
+    hi = Math.max(hi, n.midi);
+  }
+  return lo >= 55 && hi - lo <= 15;
 }
 
 /**
@@ -489,6 +523,18 @@ export function detectChordsFromNotes(
       ? new Set<number>()
       : findDronePcs(droneNotes, windows, Math.max(0.65, droneFrac));
 
+  // Per-beat bass reliability: the bass stem may be silent in intros or carry
+  // leaked guitar/ukulele (Wonderwall, Riptide intros). A beat's bass is
+  // trusted only when the stem is locally loud relative to its own typical level.
+  const bassMaxMidi = options.bassMaxMidi ?? 52;
+  let localBassOk: boolean[] = windows.map(() => true);
+  if (options.bassSamples && beatAudio) {
+    const rms = windowRms(options.bassSamples, beatAudio.sampleRate, windows);
+    const sorted = Array.from(rms).sort((a, b) => a - b);
+    const ref = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
+    localBassOk = Array.from(rms).map((r) => ref > 0 && r >= 0.15 * ref);
+  }
+
   const droneStrength = computeDroneStrength(beatChromas);
   const localNovelty = computeLocalNovelty(beatChromas);
 
@@ -560,8 +606,17 @@ export function detectChordsFromNotes(
     for (let p = 0; p < 12; p++) peak = Math.max(peak, chroma[p]!);
     const sparse = peak < 0.08 && !nt;
 
-    const bassHit = lowestBassPc(bassNotes, w.startSec, w.endSec);
+    const rawBassHit = lowestBassPc(bassNotes, w.startSec, w.endSec);
+    const bassHit =
+      rawBassHit && rawBassHit.midi <= bassMaxMidi && localBassOk[bi] ? rawBassHit : null;
+    // weak bass for this beat: globally weak stem, or no trustworthy bass here
+    const beatWeakBass = weakBass || !bassHit;
+    const ctxStart = Math.max(0, w.startSec - 2 * (w.endSec - w.startSec));
+    const ctxEnd = w.endSec + 2 * (w.endSec - w.startSec);
+    const narrow = isNarrowRegister(accompanimentNotes, ctxStart, ctxEnd);
     const proxy = lowestSustainedPc(accompanimentNotes, w.startSec, w.endSec, 58);
+    // lowest sustained instrument note = strong-but-not-absolute root evidence
+    const lowW = narrow ? 0.15 : 0.6;
     const bassChroma = new Float32Array(12);
     const nb = nnlsBassArr[bi];
     if (bassHit && !weakBass) {
@@ -573,17 +628,13 @@ export function detectChordsFromNotes(
     } else if (nb && nnlsWeight > 0.2) {
       bassChroma.set(nb);
       if (bassHit) bassChroma[bassHit.pc]! += 0.35;
-      else if (proxy) bassChroma[proxy.pc]! += 0.25;
+      else if (proxy) bassChroma[proxy.pc]! += 0.4 * lowW;
     } else if (bassHit) {
       bassChroma[bassHit.pc] = 1;
-    } else if (proxy) {
-      bassChroma[proxy.pc] = 1;
     } else {
-      const lows = notesInWindow(accompanimentNotes, w.startSec, w.endSec)
-        .filter((n) => n.midi < 55)
-        .sort((a, b) => a.midi - b.midi);
-      if (lows[0]) bassChroma[midiToPc(lows[0].midi)] = 1;
-      else bassChroma.set(chroma);
+      // no usable bass: blend lowest sustained note with treble chroma
+      for (let p = 0; p < 12; p++) bassChroma[p] = (1 - lowW) * chroma[p]!;
+      if (proxy) bassChroma[proxy.pc]! += lowW;
     }
     normalizeL2(bassChroma);
 
@@ -607,7 +658,7 @@ export function detectChordsFromNotes(
     const matchCtx: MatchContext = {
       keyPrior: key,
       keyConfidence,
-      bassWeight: weakBass ? 0.55 : 1,
+      bassWeight: weakBass ? 0.55 : beatWeakBass ? (narrow ? 0.3 : 0.6) : 1,
       extendedHarmony: weakBass || useNnls,
       droneStrength: weakBass || useNnls ? droneStrength : undefined,
       localNovelty: weakBass || useNnls ? localNovelty[bi] : undefined,
@@ -727,6 +778,7 @@ export function detectChordsPreciseFromStems(
       ...options,
       bassEnergyRatio,
       vocalSamples: vocals,
+      bassSamples: bass,
       useNnls: options.useNnls === true || (options.useNnls !== false && weakBass),
     },
     {
