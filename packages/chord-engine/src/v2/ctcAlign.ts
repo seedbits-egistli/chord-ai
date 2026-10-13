@@ -28,33 +28,67 @@ export function parseLyrics(text: string): { lines: LyricLine[]; words: { w: str
 }
 
 /** Emissions [T x V] (log-probs) from 16 kHz mono vocals, 20 s chunks. */
+/**
+ * Vocal-activity regions on the separated vocal stem: 0.1 s RMS frames above max(-40 dB of the 95th-percentile
+ * RMS, absolute floor); gaps < 1.5 s are bridged and regions padded by 0.3 s. Silent spans skip the model.
+ */
+export function vocalActiveRegions(x: Float32Array, sr = 16000): [number, number][] {
+  const hop = Math.round(sr * 0.1);
+  const n = Math.floor(x.length / hop);
+  const rms = new Float32Array(n);
+  for (let f = 0; f < n; f++) {
+    let e = 0;
+    for (let i = f * hop; i < (f + 1) * hop; i++) e += x[i]! * x[i]!;
+    rms[f] = Math.sqrt(e / hop);
+  }
+  const sorted = Float32Array.from(rms).sort();
+  const p95 = sorted[Math.floor(0.95 * (n - 1))] ?? 0;
+  const thr = Math.max(p95 * 0.01, 1e-4);
+  const regs: [number, number][] = [];
+  for (let f = 0; f < n; f++) {
+    if (rms[f]! < thr) continue;
+    const last = regs[regs.length - 1];
+    if (last && f - last[1] <= 15) last[1] = f + 1;
+    else regs.push([f, f + 1]);
+  }
+  return regs.map(([a, b]) => [Math.max(0, (a - 3) * hop), Math.min(x.length, (b + 3) * hop)] as [number, number]);
+}
+
+/** Emissions on a fixed 20 ms grid (320 samples); frames outside vocal regions are pure blank. */
 export async function wav2vec2Emissions(
-  vocals16k: Float32Array, run: OnnxRun, onProgress?: Progress,
-): Promise<{ em: Float32Array; T: number; V: number; fps: number }> {
+  vocals16k: Float32Array, run: OnnxRun, onProgress?: Progress, opts: { vad?: boolean; blank?: number } = {},
+): Promise<{ em: Float32Array; T: number; V: number; fps: number; computedSec: number }> {
   let peak = 0;
   for (const v of vocals16k) peak = Math.max(peak, Math.abs(v));
   const scale = 1 / (peak + 1e-9);
+  const HOP = 320;
   const C = 16000 * 20;
-  const parts: Float32Array[] = [];
+  const regions = opts.vad === false ? [[0, vocals16k.length] as [number, number]] : vocalActiveRegions(vocals16k);
+  const pieces: [number, number][] = [];
+  for (const [a, b] of regions) for (let s = a; s < b; s += C) if (Math.min(b, s + C) - s >= 800) pieces.push([s, Math.min(b, s + C)]);
+  const total = pieces.reduce((t, [a, b]) => t + b - a, 0) || 1;
+  const T = Math.floor(vocals16k.length / HOP);
+  let em: Float32Array | null = null;
   let V = 0;
-  let T = 0;
-  const nChunks = Math.ceil(vocals16k.length / C);
-  for (let s = 0, ci = 0; s < vocals16k.length; s += C, ci++) {
-    const seg = vocals16k.subarray(s, s + C);
-    if (seg.length < 800) break;
-    const x = new Float32Array(seg.length);
-    for (let i = 0; i < seg.length; i++) x[i] = seg[i]! * scale;
-    const o = await run({ wav: { data: x, dims: [1, x.length] } });
-    const lp = o.logp!;
-    V = lp.dims[2]!;
-    T += lp.dims[1]!;
-    parts.push(lp.data.slice());
-    onProgress?.((ci + 1) / nChunks);
+  let done = 0;
+  const blank = opts.blank ?? 0;
+  for (const [a, b] of pieces) {
+    const x = new Float32Array(b - a);
+    for (let i = 0; i < x.length; i++) x[i] = vocals16k[a + i]! * scale;
+    const lp = (await run({ wav: { data: x, dims: [1, x.length] } })).logp!;
+    if (!em) {
+      V = lp.dims[2]!;
+      em = new Float32Array(T * V).fill(-30);
+      for (let t = 0; t < T; t++) em[t * V + blank] = 0;
+    }
+    const f0 = Math.round(a / HOP);
+    const nf = Math.min(lp.dims[1]!, T - f0);
+    em.set(lp.data.subarray(0, nf * V), f0 * V);
+    done += b - a;
+    onProgress?.(done / total);
   }
-  const em = new Float32Array(T * V);
-  let off = 0;
-  for (const p of parts) { em.set(p, off); off += p.length; }
-  return { em, T, V, fps: T / (vocals16k.length / 16000) };
+  if (!em) { V = 32; em = new Float32Array(T * V).fill(-30); for (let t = 0; t < T; t++) em[t * V + blank] = 0; }
+  return { em, T, V, fps: 16000 / HOP, computedSec: total / 16000 };
 }
 
 /** CTC Viterbi forced alignment. Returns, per target token, [firstFrame, lastFrame, meanProb]. */
@@ -104,11 +138,11 @@ export function ctcForcedAlign(em: Float32Array, T: number, V: number, targets: 
 }
 
 export async function alignLyrics(
-  vocals16k: Float32Array, lyrics: string, run: OnnxRun, labels: string[], onProgress?: Progress,
+  vocals16k: Float32Array, lyrics: string, run: OnnxRun, labels: string[], onProgress?: Progress, opts: { vad?: boolean } = {},
 ): Promise<{ lines: LyricLine[]; words: AlignedWord[] }> {
   const { lines, words } = parseLyrics(lyrics);
   if (!words.length) return { lines, words: [] };
-  const { em, T, V, fps } = await wav2vec2Emissions(vocals16k, run, (p) => onProgress?.(p * 0.9));
+  const { em, T, V, fps } = await wav2vec2Emissions(vocals16k, run, (p) => onProgress?.(p * 0.9), { vad: opts.vad });
   const d = new Map(labels.map((c, i) => [c, i]));
   const targets: number[] = [];
   const wid: number[] = [];
