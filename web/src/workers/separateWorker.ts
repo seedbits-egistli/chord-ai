@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 // wasm-only entry (not default ort which loads ort-wasm-simd-threaded.jsep.*).
+import { readOrtWorkerConfig } from '../lib/ortConfig';
 import * as ort from 'onnxruntime-web/wasm';
 import {
   UMX_BASS_URL,
@@ -150,7 +151,8 @@ async function configureOrt(): Promise<void> {
     // numThreads>1 makes ORT fetch the .mjs, wrap it as blob:, then import() —
     // that fails under COOP/COEP ("Failed to fetch dynamically imported module: blob:…").
     // Keep single-threaded same-origin import of /ort/*.mjs.
-    ort.env.wasm.numThreads = 1;
+    // Threads work once /ort/* is served with COOP/COEP (pthread workers must be isolated too).
+    ort.env.wasm.numThreads = readOrtWorkerConfig(self.name).threads;
     ort.env.wasm.proxy = false;
     // Probe that same-origin runtime is real JS — Vite SPA can 200 index.html for /ort/*
     const mjsUrl = `${base}ort-wasm-simd-threaded.mjs`;

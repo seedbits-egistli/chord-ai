@@ -18,6 +18,7 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const log = [];
 page.on('console', (m) => { if (m.type() !== 'debug') console.error('[console]', m.type(), m.text().slice(0, 300)); if (m.type() === 'error') log.push(m.text()); });
+page.context().on('response', (r) => { if (r.status() >= 400) console.error('[http]', r.status(), r.url()); });
 page.on('pageerror', (e) => console.error('[pageerror]', e.message));
 page.on('worker', (w) => console.error('[worker]', w.url()));
 await page.goto(BASE, { waitUntil: 'networkidle' });

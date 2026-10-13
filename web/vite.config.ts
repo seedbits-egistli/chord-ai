@@ -8,6 +8,7 @@ import {
   statSync,
   existsSync,
   createReadStream,
+  readFileSync,
 } from 'node:fs';
 import { syncOrtRuntime } from '../scripts/sync-ort-runtime.mjs';
 
@@ -111,6 +112,9 @@ function ensureOrtRuntime(): Plugin {
           res.setHeader('Content-Length', String(size));
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+          // pthread workers are spawned from this script and must be cross-origin isolated themselves.
+          res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+          res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
           if (req.method === 'HEAD') {
             res.end();
             return;
@@ -157,13 +161,34 @@ function serveLocalModels(): Plugin {
   };
 }
 
+/**
+ * Dev only: serve onnxruntime-web's ort.wasm.min.mjs untransformed. Vite injects `/@vite/client`
+ * into it, and ORT re-loads its own script URL inside the emscripten pthread workers, which then
+ * deadlocks InferenceSession.create whenever numThreads > 1.
+ */
+function rawOrtInDev(): Plugin {
+  return {
+    name: 'raw-ort-in-dev',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const u = (req.url || '').split('?')[0];
+        if (!u.endsWith('/onnxruntime-web/dist/ort.wasm.min.mjs')) return next();
+        res.setHeader('Content-Type', 'text/javascript');
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+        res.end(readFileSync(ortWasmExtern));
+      });
+    },
+  };
+}
+
 const ortWasmExtern = path.resolve(
   __dirname,
   '../node_modules/onnxruntime-web/dist/ort.wasm.min.mjs',
 );
 
 export default defineConfig({
-  plugins: [react(), ensureOrtRuntime(), serveLocalModels(), stripBundledOrtWasm()],
+  plugins: [rawOrtInDev(), react(), ensureOrtRuntime(), serveLocalModels(), stripBundledOrtWasm()],
   resolve: {
     // Prefer extern-wasm build so ort.env.wasm.wasmPaths (/ort/) is used —
     // not the default bundle that resolves .wasm via import.meta.url.

@@ -1,3 +1,4 @@
+import { ortWorkerConfig } from './ortConfig';
 import {
   detectChordsFromStems,
   type DetectionResult,
@@ -62,6 +63,7 @@ export function getSeparateWorker() {
   if (!g.__chordAiSeparateWorker) {
     const w = new Worker(new URL('../workers/separateWorker.ts', import.meta.url), {
       type: 'module',
+      name: ortWorkerConfig(),
     });
     w.addEventListener('error', () => {
       if (g.__chordAiSeparateWorker === w) g.__chordAiSeparateWorker = undefined;

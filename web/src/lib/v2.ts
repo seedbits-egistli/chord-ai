@@ -1,3 +1,4 @@
+import { ortWorkerConfig } from './ortConfig';
 /**
  * v2 in-browser pipeline orchestration with staged progress, ETA, progressive results and cancel.
  * Separation reuses the UMX-HQ worker; beats/chords/alignment run in the v2 worker. Audio never leaves the device.
@@ -58,7 +59,7 @@ export function resample(x: Float32Array, from: number, to: number): Float32Arra
 
 let worker: Worker | null = null;
 function getWorker() {
-  worker ??= new Worker(new URL('../workers/v2Worker.ts', import.meta.url), { type: 'module' });
+  worker ??= new Worker(new URL('../workers/v2Worker.ts', import.meta.url), { type: 'module', name: ortWorkerConfig() });
   return worker;
 }
 let seq = 1;
@@ -166,3 +167,4 @@ export async function analyzeV2(
   emit('align', 'done', 1);
   h.onLyrics({ lines: ar.lines, words: ar.words });
 }
+

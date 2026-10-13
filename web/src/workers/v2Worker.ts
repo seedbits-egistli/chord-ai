@@ -14,6 +14,7 @@ import {
   type DetectionResult,
   type OnnxRun,
 } from '@chord-ai/engine';
+import { readOrtWorkerConfig } from '../lib/ortConfig';
 import { getCachedArrayBuffer, putArrayBuffer } from '../lib/assetCache';
 import { V2_MODELS, modelUrl, type ModelSpec } from '../lib/modelsV2';
 
@@ -31,8 +32,10 @@ export type V2Response =
 
 const post = (m: V2Response) => (self as unknown as Worker).postMessage(m);
 ort.env.wasm.wasmPaths = `${self.location.origin}/ort/`;
-// Multi-threaded wasm spawns nested workers and hung in headless Chromium; stay single-threaded like the other workers.
-ort.env.wasm.numThreads = 1;
+const cfg = readOrtWorkerConfig(self.name);
+ort.env.wasm.numThreads = cfg.threads;
+const dbg = (...a: unknown[]) => console.log('[v2w]', ((performance.now()) / 1000).toFixed(1), ...a);
+dbg('cfg', JSON.stringify(cfg), 'isolated', (self as unknown as { crossOriginIsolated: boolean }).crossOriginIsolated);
 ort.env.wasm.proxy = false;
 
 const buffers = new Map<string, ArrayBuffer>();
@@ -78,8 +81,10 @@ async function session(m: ModelSpec): Promise<OnnxRun> {
   const url = modelUrl(m);
   let s = sessions.get(url);
   if (!s) {
+    dbg('create', m.label);
     s = await ort.InferenceSession.create(new Uint8Array(buffers.get(url)!), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
     sessions.set(url, s);
+    dbg('created', m.label);
   }
   const sess = s;
   return async (feeds) => {
