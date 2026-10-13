@@ -136,10 +136,10 @@ With bpmHint (legacy harness for HJ/WW): Hey Jude 94.3 → 94.3, Wonderwall 56.2
 
 Tempo: 7/7 songs now at the reference metrical level (was 2/7 within 5%). Method: log-magnitude spectral-flux onset envelopes (full band, <180 Hz bass band, chroma-change novelty) at ~86 fps; ACF tempogram with harmonic summation; metrical hierarchy (×2^k, ternary ×3/2 only with own evidence); level chosen by a log-normal prior (90 BPM, σ = 0.6 oct) × relative salience^0.3; Ellis 2007 DP beat tracking (tightness 100). Sensitivity: prior centre 85 flips Stand By Me to 60, 100 flips Knockin'/Someone Like You to 136 — 2:1 is inherently ambiguous, so the prior is the deciding knob. Synthetic tests (`tests/beats.test.ts`): 68/90/120 exact incl. syncopation; 60 → 120 and 150 → 75 (octave-equivalent, accepted); drift followed.
 
-Known regressions / open issues:
-- Riptide 83.7 → 81.6 (strict 78.4 → 71.1): ukulele intro still Fm (F4-dominant uke notes, key prior Ab); narrow-register detector fires but treble chroma decides.
-- Wonderwall flat (~54–56). Finding: detected chord changes are steady every **2 beats** at 87 BPM (cycle ≈ 5.5 s). Scoring Wonderwall with one reference chord per 2 beats (bpm 174 in the loop expander) gives **69.1 %** final (67.0 no-hint / 71.3 hinted at baseline). Verified by ear afterwards: verse is 2 beats per chord; fixture corrected (see correction note at top). Corrected score at `2cda79f`: 68.0 % (strict 61.4 %).
-- Sus margin (0.03) is currently a no-op on this set; most spurious sus/slash removal comes from the slash/bass gating (slash labels: SLY 10 → 1, SBM 4 → 0, Riptide 4 → 0).
+Known regressions / open issues (status after follow-ups):
+- Riptide ukulele-intro Fm lock: mitigated by song-level vocabulary prior (`1cfba94`) — 81.6 → **83.7** (strict 71.1 → **75.8**). See “Intros without bass” below.
+- Wonderwall reference was wrong (1 chord / 4-beat bar). Ear-verified 2 beats/chord; fixture corrected (`21320ba`). With official remaster audio (no 16 s pre-roll): **66.2 %** tone / **66.5 %** strict. B7sus4 still often absorbed into F#m/Bm/Asus2; 0:36–0:44 Em/D/G unverified.
+- Sus margin (0.03) remains a no-op on this set; most spurious sus/slash removal comes from slash/bass gating (slash labels: SLY 10 → 1, SBM 4 → 0, Riptide 4 → 0).
 
 ### Intros without bass (commit after `21320ba`)
 

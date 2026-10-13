@@ -90,4 +90,77 @@ describe('detectChordsFromNotes', () => {
     expect(roots).toContain(5); // F
     expect(roots).toContain(0); // C
   });
+
+  it('rejects slash when bass note is too fleeting (slashMinSustain)', () => {
+    // F–A–C with C2 bass → Am/C only when the bass note sustains ≥ slashMinSustain
+    const notes: NoteEvent[] = [];
+    for (const t0 of [0, 2, 4, 6, 8, 10, 12, 14]) {
+      notes.push(note(t0, 1.8, 53, 0.9), note(t0, 1.8, 57, 0.9), note(t0, 1.8, 60, 0.85));
+    }
+    const opts = {
+      bpmHint: 120,
+      metricDecode: true,
+      simplifyLevel: 0.35,
+      allowSlash: true,
+      bassEnergyRatio: 1,
+      useNnls: false,
+    } as const;
+    const sustainedBass = [0, 2, 4, 6, 8, 10, 12, 14].map((t0) => note(t0, 1.8, 36, 0.95));
+    const fleetingBass = [0, 2, 4, 6].map((t0) => note(t0 + 0.05, 0.05, 36, 0.95));
+
+    const withSlash = detectChordsFromNotes(notes, sustainedBass, 16000, {
+      ...opts,
+      slashMinSustain: 0.45,
+    });
+    expect(withSlash.chords.some((c) => c.chord.includes('/'))).toBe(true);
+
+    const fleeting = detectChordsFromNotes(notes, fleetingBass, 16000, {
+      ...opts,
+      slashMinSustain: 0.45,
+    });
+    expect(fleeting.chords.some((c) => c.chord.includes('/'))).toBe(false);
+
+    const strictSustain = detectChordsFromNotes(notes, sustainedBass, 16000, {
+      ...opts,
+      slashMinSustain: 0.99,
+    });
+    expect(strictSustain.chords.some((c) => c.chord.includes('/'))).toBe(false);
+  });
+
+  it('silenceGate marks near-silent lead-in as N when mix audio is provided', () => {
+    const sr = 22050;
+    const totalSec = 8;
+    const samples = new Float32Array(sr * totalSec);
+    // Quiet lead-in 0–2s, then loud C major tone cluster
+    for (let i = Math.floor(sr * 2); i < samples.length; i++) {
+      const t = i / sr;
+      samples[i] =
+        0.25 * Math.sin(2 * Math.PI * 261.63 * t) +
+        0.2 * Math.sin(2 * Math.PI * 329.63 * t) +
+        0.2 * Math.sin(2 * Math.PI * 392.0 * t);
+    }
+    const notes: NoteEvent[] = [];
+    const bass: NoteEvent[] = [];
+    for (let bar = 0; bar < 4; bar++) {
+      const t0 = bar * 2;
+      notes.push(note(t0, 1.8, 60), note(t0, 1.8, 64), note(t0, 1.8, 67));
+      bass.push(note(t0, 1.8, 36));
+    }
+    const result = detectChordsFromNotes(
+      notes,
+      bass,
+      totalSec * 1000,
+      {
+        bpmHint: 120,
+        metricDecode: true,
+        silenceGate: 0.15,
+        vocabPrior: 0,
+        useNnls: false,
+        bassEnergyRatio: 1,
+      },
+      { samples, sampleRate: sr },
+    );
+    expect(result.chords.some((c) => c.chord === 'N')).toBe(true);
+    expect(result.chords.some((c) => c.chord !== 'N')).toBe(true);
+  });
 });
