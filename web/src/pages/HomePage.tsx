@@ -23,6 +23,7 @@ import { publishSheet } from '../lib/api';
 import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
 import { PlaybackControls } from '../components/PlaybackControls';
+import { AccompanimentChart } from '../components/AccompanimentChart';
 import type { PlayInstrument } from '../lib/chordVoicing';
 import type { StrumMode } from '../lib/chordSynth';
 import { getChordSynth } from '../lib/chordSynth';
@@ -636,6 +637,8 @@ export function HomePage() {
               </label>
             </div>
           </section>
+
+          {raw && <AccompanimentChart result={raw} lyricLines={lyricLines} volume={volume} />}
 
           <section className="grid-2" style={{ marginTop: '1rem' }}>
             <div className="panel">
