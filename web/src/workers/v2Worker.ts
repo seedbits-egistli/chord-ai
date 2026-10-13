@@ -20,11 +20,13 @@ import { V2_MODELS, modelUrl, type ModelSpec } from '../lib/modelsV2';
 
 export type V2Stage = 'download' | 'separate' | 'beats' | 'chords' | 'align';
 export type V2Request =
-  | { type: 'chords'; id: number; mix22k: Float32Array; acc22k: Float32Array }
+  | { type: 'beats'; id: number; mix22k: Float32Array }
+  | { type: 'chords'; id: number; acc22k: Float32Array; beats: number[]; downbeats: number[] }
   | { type: 'align'; id: number; voc16k: Float32Array; lyrics: string }
   | { type: 'status'; id: number; withAlign: boolean };
 export type V2Response =
   | { id: number; type: 'stage'; stage: V2Stage; progress: number; detail: string; bytes?: { loaded: number; total: number } }
+  | { id: number; type: 'beatsDone'; beats: number[]; downbeats: number[] }
   | { id: number; type: 'chordsDone'; result: DetectionResult; extra: { model: string; halfTime: boolean; downbeatsMs: number[] } }
   | { id: number; type: 'alignDone'; lines: { text: string; section: number }[]; words: { word: string; line: number; start: number; end: number; confidence: number }[] }
   | { id: number; type: 'status'; missingMB: number }
@@ -107,11 +109,17 @@ self.onmessage = async (ev: MessageEvent<V2Request>) => {
       post({ id: msg.id, type: 'status', missingMB: mb });
       return;
     }
-    if (msg.type === 'chords') {
-      await ensureModels(msg.id, [V2_MODELS.beat, V2_MODELS.btcMajmin, V2_MODELS.btcLarge]);
-      const stage = (stage: V2Stage, detail: string) => (p: number) => post({ id: msg.id, type: 'stage', stage, progress: p, detail });
+    const stage = (stage: V2Stage, detail: string) => (p: number) => post({ id: msg.id, type: 'stage', stage, progress: p, detail });
+    if (msg.type === 'beats') {
+      await ensureModels(msg.id, [V2_MODELS.beat]);
       const beatRun = await session(V2_MODELS.beat);
       const { beats, downbeats } = await trackBeatsBeatThis(msg.mix22k, beatRun, stage('beats', '偵測節拍'));
+      post({ id: msg.id, type: 'beatsDone', beats: Array.from(beats), downbeats: Array.from(downbeats) });
+      return;
+    }
+    if (msg.type === 'chords') {
+      await ensureModels(msg.id, [V2_MODELS.btcMajmin, V2_MODELS.btcLarge]);
+      const { beats, downbeats } = msg;
       const models = {
         majmin: { run: await session(V2_MODELS.btcMajmin), ...BTC_NORM.majmin, names: btcNames(false) },
         large: { run: await session(V2_MODELS.btcLarge), ...BTC_NORM.large, names: btcNames(true) },

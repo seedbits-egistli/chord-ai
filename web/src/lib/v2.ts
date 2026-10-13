@@ -83,7 +83,8 @@ function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => voi
     signal?.addEventListener('abort', abort);
     w.addEventListener('message', handler);
     const transfer: Transferable[] = [];
-    if (req.type === 'chords') transfer.push(req.mix22k.buffer, req.acc22k.buffer);
+    if (req.type === 'beats') transfer.push(req.mix22k.buffer);
+    if (req.type === 'chords') transfer.push(req.acc22k.buffer);
     if (req.type === 'align') transfer.push(req.voc16k.buffer);
     w.postMessage(req, transfer);
   });
@@ -107,15 +108,20 @@ export async function analyzeV2(
   h: V2Handlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const eta = new Eta();
+  // one ETA per stage: separation and beat tracking run concurrently
+  const etas = new Map<V2Stage, Eta>();
+  const etaOf = (s: V2Stage) => { let e = etas.get(s); if (!e) { e = new Eta(); etas.set(s, e); } return e; };
   const emit = (stage: V2Stage, status: StageState['status'], progress: number, extra: Partial<StageState> = {}) =>
-    h.onStage({ stage, status, progress, etaSec: status === 'active' ? eta.eta(progress) : null, ...extra });
+    h.onStage({ stage, status, progress, etaSec: status === 'active' ? etaOf(stage).eta(progress) : null, ...extra });
   const forward = (m: V2Response) => {
     if (m.type !== 'stage') return;
-    if (m.progress === 0 || (m.stage !== lastStage)) { eta.reset(); lastStage = m.stage; }
+    if (m.progress === 0) etaOf(m.stage).reset();
     emit(m.stage, m.progress >= 1 ? 'done' : 'active', m.progress, { detail: m.detail, bytes: m.bytes });
   };
-  let lastStage: V2Stage | null = null;
+  // Beat tracking only needs the mix: start it now, in parallel with separation.
+  const mix22k = resample(samples, sampleRate, 22050);
+  const beatsP = rpc<Extract<V2Response, { type: 'beatsDone' }>>({ type: 'beats', id: seq++, mix22k }, forward, signal);
+  beatsP.catch(() => {});
 
   // 1) separation (UMX-HQ worker; its own model download is reported as 下載模型)
   emit('separate', 'active', 0);
@@ -128,8 +134,8 @@ export async function analyzeV2(
       onProgress: (p, detail, fromCache) => {
         if (signal?.aborted) return;
         const dl = /下載|MB/.test(detail) && fromCache === false;
-        if (dl) { if (!sepDownloading) eta.reset(); sepDownloading = true; emit('download', 'active', Math.min(0.99, p / 0.5), { detail }); return; }
-        if (sepDownloading) { sepDownloading = false; emit('download', 'done', 1); eta.reset(); }
+        if (dl) { if (!sepDownloading) etaOf('download').reset(); sepDownloading = true; emit('download', 'active', Math.min(0.99, p / 0.5), { detail }); return; }
+        if (sepDownloading) { sepDownloading = false; emit('download', 'done', 1); }
         emit('separate', 'active', p, { detail });
       },
     });
@@ -147,21 +153,19 @@ export async function analyzeV2(
     acc[i] = (stems.bass.left[i]! + stems.bass.right[i]! + stems.other.left[i]! + stems.other.right[i]!) / 2;
     voc[i] = (stems.vocals.left[i]! + stems.vocals.right[i]!) / 2;
   }
-  const mix22k = resample(samples, sampleRate, 22050);
   const acc22k = resample(acc, sr, 22050);
   const voc16k = lyrics.trim() ? resample(voc, sr, 16000) : null;
 
   // 2) beats + chords → render immediately
-  eta.reset();
-  const cr = await rpc<Extract<V2Response, { type: 'chordsDone' }>>(
-    { type: 'chords', id: seq++, mix22k, acc22k }, forward, signal);
+  const bt = await beatsP;
   emit('beats', 'done', 1);
+  const cr = await rpc<Extract<V2Response, { type: 'chordsDone' }>>(
+    { type: 'chords', id: seq++, acc22k, beats: bt.beats, downbeats: bt.downbeats }, forward, signal);
   emit('chords', 'done', 1);
   h.onChords(cr.result, cr.extra);
 
   // 3) lyric alignment in background
   if (!voc16k) { emit('align', 'skipped', 0); return; }
-  eta.reset();
   const ar = await rpc<Extract<V2Response, { type: 'alignDone' }>>(
     { type: 'align', id: seq++, voc16k, lyrics }, forward, signal);
   emit('align', 'done', 1);
