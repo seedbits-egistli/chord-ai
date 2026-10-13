@@ -1,5 +1,7 @@
 # Chord detection validation
 
+> **Test audio change (2026-10-13):** Wonderwall test audio is now the official remaster, "Wonderwall (Remastered)" by Oasis, https://www.youtube.com/watch?v=FVdjZYfDuLE (4:19; local file `wonderwall.mp3`, never committed). Music starts at 0 s (tuning ≈ +3 ¢). The previous upload had a ~16 s near-silent lead-in (≈ −21 dB), which caused the "intro" errors reported earlier. With the corrected 2-beat reference starting at 0 s, precise mode (no BPM hint, first 60 s) gives **66.2 % tone / 66.5 % strict**, tempo 86.2 BPM. The 0:36–0:44 span (detected Em–D–Em–G vs. the verse loop) is **unverified** pending an ear check.
+
 > **Correction (2026-10-13):** the `wonderwall-real` reference used one chord per 4-beat bar. Confirmed by ear: the Wonderwall verse changes chord every **2 beats** (F#m7 A Esus4 B7sus4, half-bar each). All Wonderwall scores in this document dated before this note were computed against the wrong (per-bar) reference and understate accuracy; e.g. the 54.0 % of commit `2cda79f` is **68.0 %** against the corrected reference (strict 61.4 %). Some "late by one bar / early by 0.5 s" diagnoses were artefacts of that reference.
 
 > **Copyright / ToS:** Real commercial recordings used for local validation are **not** stored in this repository and must not be redistributed. Synthesized rows render chords only (no copyrighted audio). **Commercial / streaming audio was never downloaded by this project for CI — only optional local files supplied by the developer.**
@@ -157,3 +159,17 @@ Investigation (first 60 s, local audio):
 | Wonderwall (2-beat ref) | 68.0 → 68.0 | 61.4 → 61.4 |
 
 A gentler always-on version (weight scaled by 1 − rel) cost Hey Jude −6.8, so the prior is restricted to clearly quiet passages.
+
+### 7-song bench with official Wonderwall remaster (no bpmHint, first 60 s)
+
+| Song | Ref BPM | Detected BPM | Tone % | Strict % |
+|---|---:|---:|---:|---:|
+| Let It Be | 72 | 73.8 | 79.4 | 76.4 |
+| Knockin' on Heaven's Door | 68 | 69.0 | 93.4 | 86.1 |
+| Stand By Me | 118 | 120.2 | 96.4 | 94.8 |
+| Someone Like You | 67.5 | 67.2 | 97.6 | 97.0 |
+| Riptide | 102 | 101.4 | 83.7 | 75.8 |
+| Hey Jude | 74.5 | 74.9 | 94.3 | 86.1 |
+| Wonderwall (remaster) | 87 | 86.2 | 66.2 | 66.5 |
+
+Wonderwall: bars 1–13 lock to the verse loop (F#m7→F#m, A→A, Esus4→E/A); B7sus4 is never detected (absorbed into F#m/Bm/Asus2). 0:36–0:44 detected Em/D/Em/G — unverified.

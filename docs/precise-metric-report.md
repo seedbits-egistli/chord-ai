@@ -1,5 +1,7 @@
 # Precise metric / downbeat report
 
+> **Test audio change (2026-10-13):** Wonderwall test audio is now the official remaster, "Wonderwall (Remastered)" by Oasis, https://www.youtube.com/watch?v=FVdjZYfDuLE (4:19; local file `wonderwall.mp3`, never committed). Music starts at 0 s (tuning ≈ +3 ¢). The previous upload had a ~16 s near-silent lead-in (≈ −21 dB), which caused the "intro" errors reported earlier. With the corrected 2-beat reference starting at 0 s, precise mode (no BPM hint, first 60 s) gives **66.2 % tone / 66.5 % strict**, tempo 86.2 BPM. The 0:36–0:44 span (detected Em–D–Em–G vs. the verse loop) is **unverified** pending an ear check.
+
 > **Correction (2026-10-13):** the `wonderwall-real` reference used one chord per 4-beat bar. Confirmed by ear: the Wonderwall verse changes chord every **2 beats** (F#m7 A Esus4 B7sus4, half-bar each). All Wonderwall scores in this document dated before this note were computed against the wrong (per-bar) reference and understate accuracy; e.g. the 54.0 % of commit `2cda79f` is **68.0 %** against the corrected reference (strict 61.4 %). Some "late by one bar / early by 0.5 s" diagnoses were artefacts of that reference.
 
 Generated 2026-10-12T17:02:16.009Z by `packages/chord-engine/scripts/metric-precise-report.ts`.

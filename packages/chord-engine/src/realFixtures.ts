@@ -118,7 +118,7 @@ function wonderwallRef(): RealSongReference {
     key: 'F#m',
     bpm,
     source:
-      'Ultimate Guitar Wonderwall capo 2; sounding F#m7–A–Esus4–B7sus4 (verse, 2 beats per chord) / D–F#m7–A (chorus). Phase-aligned. Local audio only.',
+      'Audio: official Oasis "Wonderwall (Remastered)" https://www.youtube.com/watch?v=FVdjZYfDuLE (4:19, music from 0 s; replaces an earlier upload with ~16 s near-silent lead-in). Reference starts at 0 s. 0:36–0:44 detected Em/D/G — unverified by ear. Ultimate Guitar Wonderwall capo 2; sounding F#m7–A–Esus4–B7sus4 (verse, 2 beats per chord) / D–F#m7–A (chorus). Phase-aligned. Local audio only.',
     loops,
     segmentsMs: buildSegments(bpm, loops),
   };
