@@ -8,6 +8,7 @@ import {
   statSync,
   existsSync,
   createReadStream,
+  readFileSync,
 } from 'node:fs';
 import { syncOrtRuntime } from '../scripts/sync-ort-runtime.mjs';
 
@@ -111,6 +112,9 @@ function ensureOrtRuntime(): Plugin {
           res.setHeader('Content-Length', String(size));
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+          // pthread workers are spawned from this script and must be cross-origin isolated themselves.
+          res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+          res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
           if (req.method === 'HEAD') {
             res.end();
             return;
@@ -129,13 +133,62 @@ function ensureOrtRuntime(): Plugin {
   };
 }
 
+/**
+ * Dev-only: serve v2 ONNX models from a local folder at /models/ (production uses VITE_MODEL_BASE_URL,
+ * e.g. the R2 bucket). Folder: $CHORD_AI_MODELS_DIR or <repo>/models-v2 (gitignored).
+ */
+function serveLocalModels(): Plugin {
+  const dir = path.resolve(process.env.CHORD_AI_MODELS_DIR ?? path.resolve(__dirname, '../models-v2'));
+  return {
+    name: 'serve-local-models',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const raw = req.url?.split('?')[0] ?? '';
+        if (!raw.startsWith('/models/')) return next();
+        const name = decodeURIComponent(raw.slice('/models/'.length));
+        const file = path.join(dir, name);
+        if (!name || name.includes('..') || !existsSync(file) || !statSync(file).isFile()) {
+          res.statusCode = 404;
+          res.end(`model not found: ${name} (put files in ${dir})`);
+          return;
+        }
+        res.setHeader('Content-Type', name.endsWith('.json') ? 'application/json' : name.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream');
+        res.setHeader('Content-Length', String(statSync(file).size));
+        res.setHeader('Cache-Control', 'no-cache');
+        createReadStream(file).pipe(res);
+      });
+    },
+  };
+}
+
+/**
+ * Dev only: serve onnxruntime-web's ort.wasm.min.mjs untransformed. Vite injects `/@vite/client`
+ * into it, and ORT re-loads its own script URL inside the emscripten pthread workers, which then
+ * deadlocks InferenceSession.create whenever numThreads > 1.
+ */
+function rawOrtInDev(): Plugin {
+  return {
+    name: 'raw-ort-in-dev',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const u = (req.url || '').split('?')[0];
+        if (!u.endsWith('/onnxruntime-web/dist/ort.wasm.min.mjs')) return next();
+        res.setHeader('Content-Type', 'text/javascript');
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+        res.end(readFileSync(ortWasmExtern));
+      });
+    },
+  };
+}
+
 const ortWasmExtern = path.resolve(
   __dirname,
   '../node_modules/onnxruntime-web/dist/ort.wasm.min.mjs',
 );
 
 export default defineConfig({
-  plugins: [react(), ensureOrtRuntime(), stripBundledOrtWasm()],
+  plugins: [rawOrtInDev(), react(), ensureOrtRuntime(), serveLocalModels(), stripBundledOrtWasm()],
   resolve: {
     // Prefer extern-wasm build so ort.env.wasm.wasmPaths (/ort/) is used —
     // not the default bundle that resolves .wasm via import.meta.url.

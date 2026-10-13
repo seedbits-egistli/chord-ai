@@ -465,3 +465,34 @@ textarea {
 .accomp-bar.playing { background: rgba(255, 196, 0, 0.28); }
 .accomp-chord { text-align: left; }
 .accomp-lyric-text { padding: 0.15rem 0 0.5rem 0.5rem; opacity: 0.9; }
+
+/* ---- v2: staged progress ---- */
+.stages { display: grid; gap: 0.45rem; }
+.stage-head { display: flex; justify-content: space-between; font-size: 0.9rem; }
+.stage-note { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.stage-pending { opacity: 0.5; }
+.stage-skipped { opacity: 0.6; }
+
+/* ---- v2: lyric chart (desktop UG / mobile ChordPro) ---- */
+.lyric-chart { position: relative; font-size: 1.05rem; line-height: 1.25; }
+.lc-row { margin: 0.35rem 0; }
+.lc-break { margin-top: 1.2rem; }
+.lc-ug { display: flex; flex-wrap: wrap; column-gap: 0.32em; row-gap: 0.25rem; }
+.lc-ug .lc-tok { display: inline-flex; flex-direction: column; cursor: pointer; border-radius: 4px; padding: 0 1px; }
+.lc-ch { color: var(--accent, #d97706); font-weight: 700; font-size: 0.92em; min-height: 1.2em; white-space: pre; }
+.lc-cp { display: none; }
+.lc-cp .lc-ch { margin-right: 1px; }
+.lc-tok.on { background: #22a55a; color: #fff; }
+.lc-tok.on .lc-ch { color: #fff; }
+.lc-tok.done .lc-w, .lc-cp .lc-tok.done { opacity: 0.65; }
+.lc-inst { display: flex; gap: 1rem; color: var(--accent, #d97706); font-weight: 700; }
+.lc-inst.on { background: rgba(34, 165, 90, 0.15); }
+.now-chord { position: sticky; top: 0; float: right; font-size: 1.6rem; font-weight: 800; padding: 0.2rem 0.7rem;
+  border-radius: 8px; background: var(--panel, #111); color: var(--accent, #d97706); z-index: 1; }
+.player-row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin: 0.5rem 0 0.75rem; }
+.player-row audio { width: min(100%, 420px); }
+@media (max-width: 640px) {
+  .lc-ug { display: none; }
+  .lc-cp { display: block; }
+  .now-chord { font-size: 1.2rem; }
+}

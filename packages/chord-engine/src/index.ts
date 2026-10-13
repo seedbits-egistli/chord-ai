@@ -23,3 +23,11 @@ export * from './basicPitch.js';
 // loadAudio is Node/ffmpeg-only — import from './loadAudio.js' in scripts, not the browser bundle
 export * from './guitarShapes.js';
 export * from './accompaniment.js';
+export * from './v2/types.js';
+export * from './v2/cqt.js';
+export * from './v2/btc.js';
+export * from './v2/htdemucs.js';
+export * from './v2/beatThis.js';
+export * from './v2/ctcAlign.js';
+export * from './v2/lyricChart.js';
+export * from './v2/pipeline.js';

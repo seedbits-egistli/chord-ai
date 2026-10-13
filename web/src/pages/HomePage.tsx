@@ -24,6 +24,8 @@ import { ChordDiagram } from '../components/ChordDiagram';
 import { StaffView } from '../components/StaffView';
 import { PlaybackControls } from '../components/PlaybackControls';
 import { AccompanimentChart } from '../components/AccompanimentChart';
+import { StagedProgress } from '../components/StagedProgress';
+import { analyzeV2, CancelledError, type Separator, type AlignedLyrics, type StageState, type V2Stage } from '../lib/v2';
 import type { PlayInstrument } from '../lib/chordVoicing';
 import type { StrumMode } from '../lib/chordSynth';
 import { getChordSynth } from '../lib/chordSynth';
@@ -41,6 +43,7 @@ const COMMON = [
 ];
 
 export function HomePage() {
+  const [separator, setSeparator] = useState<Separator>('umx');
   const [status, setStatus] = useState('選擇麥克風或上傳音檔開始（音訊不會上傳）。');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -64,7 +67,15 @@ export function HomePage() {
   const [artist, setArtist] = useState('');
   const [editLink, setEditLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<DetectMode>('fast');
+  const [mode, setMode] = useState<DetectMode | 'v2'>('v2');
+  const modeState = mode;
+  const [stages, setStages] = useState<Partial<Record<V2Stage, StageState>>>({});
+  const [aligned, setAligned] = useState<AlignedLyrics | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [playTime, setPlayTime] = useState<number | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const [v2Running, setV2Running] = useState(false);
   const [modeHint, setModeHint] = useState('偵測裝置能力中…');
   const [webgpu, setWebgpu] = useState(false);
   const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
@@ -89,7 +100,7 @@ export function HomePage() {
 
   useEffect(() => {
     void defaultDetectMode().then((c) => {
-      setMode(c.mode);
+      setMode((m) => (m === 'v2' ? m : c.mode));
       setWebgpu(c.webgpu);
       setModeHint(c.reason);
     });
@@ -201,7 +212,8 @@ export function HomePage() {
     if (v === 'guitar' || v === 'ukulele') setInstrument(v);
   }
 
-  async function runDetect(samples: Float32Array, sampleRate: number) {
+  async function runDetect(samples: Float32Array, sampleRate: number, forceMode?: DetectMode) {
+    const mode: DetectMode = forceMode ?? (modeState === 'v2' ? 'precise' : modeState);
     setBusy(true);
     setError(null);
     setProgress(5);
@@ -261,15 +273,90 @@ export function HomePage() {
     }
   }
 
+  async function runV2(samples: Float32Array, sampleRate: number) {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setBusy(true);
+    setV2Running(true);
+    setError(null);
+    setAligned(null);
+    setStages({ download: { stage: 'download', status: 'skipped', progress: 0, etaSec: null } });
+    setStatus('精準 v2：全部在瀏覽器內分析（音訊不離開此裝置）…');
+    const t0 = performance.now();
+    try {
+      await analyzeV2(
+        samples,
+        sampleRate,
+        lyricsText,
+        {
+          onStage: (st) => setStages((prev) => ({ ...prev, [st.stage]: st })),
+          onChords: (r, extra) => {
+            setRaw(r);
+            setTranspose(0);
+            setSelected(0);
+            setBusy(false);
+            setStatus(
+              `和弦完成（${((performance.now() - t0) / 1000).toFixed(0)} 秒）：調性 ${r.key}、${r.bpm} BPM、模型 ${extra.model}` +
+                (extra.halfTime ? '（半速校正）' : '') +
+                (lyricsText.trim() ? '；歌詞對齊中…' : ''),
+            );
+          },
+          onLyrics: (a) => {
+            setAligned(a);
+            setStatus((s) => s.replace('；歌詞對齊中…', '') + `；歌詞已對齊（${((performance.now() - t0) / 1000).toFixed(0)} 秒）`);
+          },
+        },
+        ac.signal,
+        separator,
+      );
+    } catch (e) {
+      if (e instanceof CancelledError) {
+        setStatus('已取消');
+      } else {
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(`精準 v2 失敗：${msg} — 改用舊版精準模式`);
+        setV2Running(false);
+        await runDetect(samples, sampleRate, 'precise');
+        return;
+      }
+    } finally {
+      setBusy(false);
+      setV2Running(false);
+    }
+  }
+
+  function cancelV2() {
+    abortRef.current?.abort();
+  }
+
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    let raf = 0;
+    const tick = () => {
+      setPlayTime(a.currentTime);
+      if (!a.paused) raf = requestAnimationFrame(tick);
+    };
+    const onPlay = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(tick); };
+    const onSeeked = () => setPlayTime(a.currentTime);
+    a.addEventListener('play', onPlay);
+    a.addEventListener('seeked', onSeeked);
+    return () => { cancelAnimationFrame(raf); a.removeEventListener('play', onPlay); a.removeEventListener('seeked', onSeeked); };
+  }, [audioUrl]);
+
   async function onUpload(file: File | null) {
     if (!file) return;
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    setAudioUrl(URL.createObjectURL(file)); // local playback only — never uploaded
     setBusy(true);
     setStatus(`解碼 ${file.name}…`);
     setProgress(5);
     try {
       const { samples, sampleRate } = await decodeFile(file);
       setProgress(15);
-      await runDetect(samples, sampleRate);
+      if (mode === 'v2') await runV2(samples, sampleRate);
+      else await runDetect(samples, sampleRate);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -295,7 +382,8 @@ export function HomePage() {
     setStatus('整理錄音…');
     const { samples, sampleRate } = await recorder.stop();
     setRecorder(null);
-    await runDetect(samples, sampleRate);
+    if (mode === 'v2') await runV2(samples, sampleRate);
+    else await runDetect(samples, sampleRate);
   }
 
   function updateChord(idx: number, next: string) {
@@ -430,6 +518,17 @@ export function HomePage() {
                 <input
                   type="radio"
                   name="detect-mode"
+                  checked={mode === 'v2'}
+                  disabled={busy || cacheBusy}
+                  onChange={() => setMode('v2')}
+                  data-testid="mode-v2"
+                />
+                精準 v2（推薦）
+              </label>
+              <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="detect-mode"
                   checked={mode === 'fast'}
                   disabled={busy || cacheBusy}
                   onChange={() => setMode('fast')}
@@ -464,12 +563,38 @@ export function HomePage() {
               </label>
             </div>
             <p style={{ margin: '0.45rem 0 0', lineHeight: 1.45 }}>
-              {mode === 'fast'
+              {mode === 'v2'
+                ? '精準 v2：UMX-HQ 分離 → Beat This! 節拍 → BTC 和弦 → wav2vec2 歌詞對齊，全部在瀏覽器內執行（首次下載約 70 MB；有貼歌詞再加約 95 MB，之後快取）。'
+                : mode === 'fast'
                 ? '快速：完整混音色度比對（無需下載模型）。'
                 : '精準：UMX-HQ 分離 → Basic Pitch 轉錄伴奏/貝斯 → 音符和弦推斷（約 34MB + 0.2MB，可快取；較慢）。'}{' '}
               {modeHint}
             </p>
           </div>
+          {mode === 'v2' && (
+            <div className="mode-toggle" role="radiogroup" aria-label="分離品質" style={{ marginTop: '0.5rem' }}>
+              <label>
+                <input type="radio" name="sep" data-testid="sep-umx" checked={separator === 'umx'} disabled={busy} onChange={() => setSeparator('umx')} />
+                分離：快速（UMX-HQ）
+              </label>
+              <label>
+                <input type="radio" name="sep" data-testid="sep-htdemucs" checked={separator === 'htdemucs'} disabled={busy} onChange={() => setSeparator('htdemucs')} />
+                高品質（HT-Demucs，+166 MB，約歌曲長度 0.7–1 倍時間）
+              </label>
+            </div>
+          )}
+          {mode === 'v2' && (
+            <div className="field" style={{ marginTop: '0.75rem', maxWidth: '36rem' }}>
+              <label>歌詞（選填，先貼再上傳；空行＝新段落）</label>
+              <textarea
+                rows={4}
+                data-testid="lyrics-input"
+                placeholder={'貼上歌詞，和弦會對到每個字上方'}
+                value={lyricsText}
+                onChange={(e) => setLyricsText(e.target.value)}
+              />
+            </div>
+          )}
           <div
             style={{
               marginTop: '0.65rem',
@@ -526,6 +651,15 @@ export function HomePage() {
         </div>
         <p className="status">{status}</p>
         {error && <p className="error">{error}</p>}
+        {mode === 'v2' && Object.keys(stages).length > 0 && (
+          <StagedProgress stages={stages} running={v2Running} onCancel={cancelV2} />
+        )}
+        {audioUrl && (
+          <div className="player-row">
+            <audio ref={audioRef} src={audioUrl} controls preload="auto" data-testid="local-audio" />
+            <span className="status">本機播放（不上傳）· 播放時歌詞與和弦會跟著亮</span>
+          </div>
+        )}
       </div>
 
       {view && (
@@ -638,7 +772,21 @@ export function HomePage() {
             </div>
           </section>
 
-          {raw && <AccompanimentChart result={raw} lyricLines={lyricLines} volume={volume} />}
+          {raw && (
+            <AccompanimentChart
+              result={raw}
+              lyricLines={lyricLines}
+              volume={volume}
+              aligned={aligned}
+              time={playTime}
+              onSeek={(t) => {
+                if (audioRef.current) {
+                  audioRef.current.currentTime = t;
+                  void audioRef.current.play();
+                }
+              }}
+            />
+          )}
 
           <section className="grid-2" style={{ marginTop: '1rem' }}>
             <div className="panel">

@@ -20,6 +20,8 @@ const destDir = join(root, 'web/public/ort');
 export const ORT_RUNTIME_FILES = [
   'ort-wasm-simd-threaded.wasm',
   'ort-wasm-simd-threaded.mjs',
+  // WebGPU build glue (its 26.8 MB .wasm is too big for Pages; it is served from R2 under <MODEL_BASE_URL>/ort/)
+  'ort-wasm-simd-threaded.asyncify.mjs',
 ];
 
 /**
