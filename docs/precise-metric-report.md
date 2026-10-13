@@ -1,5 +1,7 @@
 # Precise metric / downbeat report
 
+> **Correction (2026-10-13):** the `wonderwall-real` reference used one chord per 4-beat bar. Confirmed by ear: the Wonderwall verse changes chord every **2 beats** (F#m7 A Esus4 B7sus4, half-bar each). All Wonderwall scores in this document dated before this note were computed against the wrong (per-bar) reference and understate accuracy; e.g. the 54.0 % of commit `2cda79f` is **68.0 %** against the corrected reference (strict 61.4 %). Some "late by one bar / early by 0.5 s" diagnoses were artefacts of that reference.
+
 Generated 2026-10-12T17:02:16.009Z by `packages/chord-engine/scripts/metric-precise-report.ts`.
 
 ## Before / after (precise first 60s)

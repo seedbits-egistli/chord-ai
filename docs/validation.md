@@ -1,5 +1,7 @@
 # Chord detection validation
 
+> **Correction (2026-10-13):** the `wonderwall-real` reference used one chord per 4-beat bar. Confirmed by ear: the Wonderwall verse changes chord every **2 beats** (F#m7 A Esus4 B7sus4, half-bar each). All Wonderwall scores in this document dated before this note were computed against the wrong (per-bar) reference and understate accuracy; e.g. the 54.0 % of commit `2cda79f` is **68.0 %** against the corrected reference (strict 61.4 %). Some "late by one bar / early by 0.5 s" diagnoses were artefacts of that reference.
+
 > **Copyright / ToS:** Real commercial recordings used for local validation are **not** stored in this repository and must not be redistributed. Synthesized rows render chords only (no copyrighted audio). **Commercial / streaming audio was never downloaded by this project for CI — only optional local files supplied by the developer.**
 
 ## Method
@@ -134,5 +136,5 @@ Tempo: 7/7 songs now at the reference metrical level (was 2/7 within 5%). Method
 
 Known regressions / open issues:
 - Riptide 83.7 → 81.6 (strict 78.4 → 71.1): ukulele intro still Fm (F4-dominant uke notes, key prior Ab); narrow-register detector fires but treble chroma decides.
-- Wonderwall flat (~54–56). Finding: detected chord changes are steady every **2 beats** at 87 BPM (cycle ≈ 5.5 s). Scoring Wonderwall with one reference chord per 2 beats (bpm 174 in the loop expander) gives **69.1 %** final (67.0 no-hint / 71.3 hinted at baseline). The `wonderwall-real` fixture (one chord per 4-beat bar) should be verified by ear before more tuning against it.
+- Wonderwall flat (~54–56). Finding: detected chord changes are steady every **2 beats** at 87 BPM (cycle ≈ 5.5 s). Scoring Wonderwall with one reference chord per 2 beats (bpm 174 in the loop expander) gives **69.1 %** final (67.0 no-hint / 71.3 hinted at baseline). Verified by ear afterwards: verse is 2 beats per chord; fixture corrected (see correction note at top). Corrected score at `2cda79f`: 68.0 % (strict 61.4 %).
 - Sus margin (0.03) is currently a no-op on this set; most spurious sus/slash removal comes from the slash/bass gating (slash labels: SLY 10 → 1, SBM 4 → 0, Riptide 4 → 0).

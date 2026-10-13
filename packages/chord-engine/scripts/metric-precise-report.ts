@@ -11,7 +11,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadAudioFile } from '../src/loadAudio.js';
-import { REAL_FIXTURES } from '../src/realFixtures.js';
+import { REAL_FIXTURES, expandLoop } from '../src/realFixtures.js';
 import { detectChordsPreciseFromStems, noteChroma, type NoteEvent } from '../src/preciseDetect.js';
 import { transcribeNotes } from '../src/basicPitch.js';
 import { separateMonoNode } from './separate-node.js';
@@ -34,21 +34,9 @@ function expandLoopPhase(
   toMs: number,
   bars: string[],
   phaseBars: number,
+  beatsPerChord = 4,
 ): Array<{ chord: string; startMs: number; endMs: number }> {
-  const barMs = (4 * 60000) / bpm;
-  const out: Array<{ chord: string; startMs: number; endMs: number }> = [];
-  let t = fromMs + phaseBars * barMs;
-  while (t > fromMs) t -= bars.length * barMs;
-  let i = 0;
-  while (t < toMs) {
-    const chord = bars[i % bars.length]!;
-    const startMs = Math.max(fromMs, t);
-    const endMs = Math.min(toMs, t + barMs);
-    if (endMs > startMs) out.push({ chord, startMs, endMs });
-    t += barMs;
-    i++;
-  }
-  return out;
+  return expandLoop(bpm, fromMs, toMs, bars, phaseBars, beatsPerChord);
 }
 
 function chordTones(label: string): string {
@@ -167,7 +155,14 @@ async function runOne(refId: string) {
     const segs: Array<{ chord: string; startMs: number; endMs: number }> = [];
     for (const loop of ref.loops) {
       segs.push(
-        ...expandLoopPhase(ref.bpm, loop.fromMs, loop.toMs, loop.bars, phase % loop.bars.length),
+        ...expandLoopPhase(
+          ref.bpm,
+          loop.fromMs,
+          loop.toMs,
+          loop.bars,
+          phase % loop.bars.length,
+          loop.beatsPerChord,
+        ),
       );
     }
     const s = scoreAgainstTimedReference(result.chords, segs, {
@@ -237,6 +232,7 @@ async function main() {
     sepMaxSec * 1000,
     ww.ref.loops[0]!.bars,
     fixedPhase,
+    ww.ref.loops[0]!.beatsPerChord,
   );
 
   const sectionRanges = [
@@ -281,6 +277,7 @@ async function main() {
         loop.toMs,
         loop.bars,
         ww.bestPhase % loop.bars.length,
+        loop.beatsPerChord,
       ),
     );
   }
