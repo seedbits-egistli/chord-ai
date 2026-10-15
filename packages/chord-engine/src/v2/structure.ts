@@ -198,7 +198,12 @@ export function analyzeStructure(
   let a0 = 0; for (const c of cuts) { segs.push([a0, c]); a0 = c; }
   // ---- per-segment info
   const info = segs.map(([a, b]) => {
-    const ls = lines.filter((l) => { const lb = nearestBar(l.start); return lb >= a && lb < b; });
+    // a line belongs to the segment holding most of it (start snapped to the nearest bar line for pickups)
+    const ls = lines.filter((l) => {
+      const s0 = bars[nearestBar(l.start)]!, e0 = Math.max(l.end, s0 + 0.1);
+      const ov = Math.min(e0, bars[b]!) - Math.max(s0, bars[a]!);
+      return ov > 0 && ov >= (e0 - s0) / 2 - 1e-6;
+    });
     let v = 0; for (let k = a; k < b; k++) v += vocal[k]!;
     let e = 0; for (let k = a; k < b; k++) e += en[k]!;
     return { a, b, lyrics: ls.map((l) => l.text), text: ls.map((l) => l.text).join(' '), vocal: v / (b - a), energy: e / (b - a) };
@@ -246,6 +251,16 @@ export function analyzeStructure(
       for (let j = i + 1; j < n; j++) if (grp[j]! < 0 && isVocal(j) && musicSim(i, j) > mThr) grp[j] = g;
       g++;
     }
+    // singletons join the most similar multi-member cluster when reasonably close
+    const sizes = new Map<number, number>();
+    for (const x of grp) if (x >= 0) sizes.set(x, (sizes.get(x) ?? 0) + 1);
+    const lo = off[Math.floor(off.length * 0.45)] ?? 0.6;
+    for (let i = 0; i < n; i++) {
+      if (grp[i]! < 0 || sizes.get(grp[i]!)! > 1) continue;
+      let bj = -1, bs = lo;
+      for (let j = 0; j < n; j++) if (j !== i && grp[j]! >= 0 && sizes.get(grp[j]!)! > 1 && musicSim(i, j) > bs) { bs = musicSim(i, j); bj = j; }
+      if (bj >= 0) grp[i] = grp[bj]!; else grp[i] = -1;
+    }
     let bestE = -1;
     for (let k = 0; k < g; k++) {
       const m = info.filter((_, i) => grp[i] === k);
@@ -274,7 +289,7 @@ export function analyzeStructure(
     }
     if (grp[i] === chorusG) kind[i] = 'chorus';
     else if (grp[i] === verseG) kind[i] = 'verse';
-    else if (grp[i]! >= 0 && grp[i]! < lyricGroups) kind[i] = info[i + 1] && grp[i + 1] === chorusG ? 'prechorus' : 'chorus';
+    else if (grp[i]! >= 0 && grp[i]! < lyricGroups) kind[i] = info[i + 1] && grp[i + 1] === chorusG ? 'prechorus' : 'verse';
     else if (grp[i]! >= 0) kind[i] = 'verse';
     else kind[i] = 'bridge';
   }
@@ -284,7 +299,10 @@ export function analyzeStructure(
   const merged: { a: number; b: number; kind: SectionKind; grp: number; lyrics: string[]; vocal: number }[] = [];
   for (let i = 0; i < n; i++) {
     const p = merged[merged.length - 1];
-    if (p && p.kind === kind[i] && (p.grp === grp[i] || ['intro', 'outro', 'interlude'].includes(kind[i]!)) && p.kind !== 'chorus') {
+    const inst = ['intro', 'outro', 'interlude'].includes(kind[i]!);
+    // vocal sections merge only within one lyric paragraph (or, without lyrics, up to 16 bars of the same group)
+    const vocalMerge = p && p.grp === grp[i] && p.kind !== 'chorus' && (hasLyrics ? !para.has(info[i]!.a) : info[i]!.b - p.a <= 16);
+    if (p && p.kind === kind[i] && (inst || vocalMerge)) {
       p.vocal = (p.vocal * (p.b - p.a) + info[i]!.vocal * (info[i]!.b - info[i]!.a)) / (info[i]!.b - p.a);
       p.b = info[i]!.b; p.lyrics.push(...info[i]!.lyrics); continue;
     }
