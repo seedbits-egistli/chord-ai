@@ -17,3 +17,9 @@
 
 ## 驗證
 `BASE=http://localhost:5173 CHROME_PATH=... node scripts/verify-song-analysis.mjs <audio> [lyrics|-] <outDir> <name>`（音檔、歌詞只在本機，不進 repo）。
+
+## v2 調整（2026-10-15）
+- 段落改為粗粒度：相鄰同類段合併（上限約 70 秒）、人聲段至少 11.5 秒、器樂段至少 4 秒，過短者併入最相似的鄰段；總數超過 12 段時再合併最短段。
+- 歌詞行若被 CTC 拉得比中位數長 2.5 倍以上（且超過 8 秒），不拿來判斷段落（避免獨奏被當副歌）。
+- 旋律播放改用取樣鋼琴：FluidR3_GM acoustic grand piano（gleitz/midi-js-soundfonts，CC-BY 3.0；FluidR3 本身 MIT），放在 `web/public/samples/piano/`（約 530 KB，附 LICENSE.txt）。模式：原曲／原曲＋旋律（可調音量）／只有旋律。
+- 播放時顯示目前歌詞行，逐字高亮；可匯出旋律 .mid（Type 0、PPQ 480、速度取拍點中位數）。
