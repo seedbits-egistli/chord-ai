@@ -23,3 +23,8 @@
 - 歌詞行若被 CTC 拉得比中位數長 2.5 倍以上（且超過 8 秒），不拿來判斷段落（避免獨奏被當副歌）。
 - 旋律播放改用取樣鋼琴：FluidR3_GM acoustic grand piano（gleitz/midi-js-soundfonts，CC-BY 3.0；FluidR3 本身 MIT），放在 `web/public/samples/piano/`（約 530 KB，附 LICENSE.txt）。模式：原曲／原曲＋旋律（可調音量）／只有旋律。
 - 播放時顯示目前歌詞行，逐字高亮；可匯出旋律 .mid（Type 0、PPQ 480、速度取拍點中位數）。
+
+## v3（五線譜、滑音、時值）
+- UI 切換「鋼琴捲簾 / 五線譜」。五線譜用 VexFlow 4.2（MIT）：調號（旋律音級 KS）、拍號 4/4、量化時值與休止符、歌詞、段落標、滑音 ⤵＋連線；播放時高亮目前小節／音並自動捲動。
+- 滑音：連續 f0 平台之間的 portamento → `glideTo`；鋼琴以 playbackRate ramp 播放；MIDI 用 pitch bend。
+- 時值：16 分格吸附 + 只允許常見時值；段落內重複投票統一節奏。

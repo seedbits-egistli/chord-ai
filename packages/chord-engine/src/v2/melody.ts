@@ -115,7 +115,7 @@ export function pitchToNotes(t: PitchTrack, beats: number[], voicing = 0.5): Mel
       const gap = cur.i0 - prev.i1;
       const voiced = gap > 0 && Array.from({ length: gap }, (_, k) => sm[prev.i1 + k]!).every((v) => !Number.isNaN(v));
       const delta = cur.midi - prev.midi;
-      if (voiced && Math.abs(delta) >= 1 && gap * t.hop >= 0.04) {
+      if (voiced && Math.abs(delta) >= 1.5 && gap * t.hop >= 0.06) {
         // continuous slide → glide note spanning the gap (and optionally overlapping plateau edges)
         const g0 = prev.i1;
         const g1 = cur.i0;

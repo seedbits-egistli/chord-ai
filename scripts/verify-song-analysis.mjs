@@ -43,6 +43,20 @@ await page.screenshot({ path: `${outDir}/${name}-playing.png`, fullPage: true })
 await page.getByTestId('rep-toggle').check();
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${outDir}/${name}-rep.png`, fullPage: true });
+await page.getByTestId('view-staff').click();
+await page.waitForTimeout(1500);
+await page.screenshot({ path: `${outDir}/${name}-staff.png`, fullPage: true });
+await page.getByTestId('view-roll').click();
+await page.waitForTimeout(500);
+await page.screenshot({ path: `${outDir}/${name}-roll.png`, fullPage: true });
+const dump = await page.evaluate(() => {
+  const d = window.__saDump?.();
+  if (!d) return null;
+  return { key: d.key, nNotes: d.notes?.length, nGlides: d.notes?.filter((n) => n.glideTo != null).length,
+    sections: d.structure?.sections?.map((s) => ({ label: s.label, start: s.start, end: s.end })),
+    sample: d.notes?.filter((n) => n.glideTo != null).slice(0, 8).map((n) => [n.start, n.end, n.midi, n.glideTo, n.ticks]) };
+});
+if (dump) { writeFileSync(`${outDir}/${name}-meta.json`, JSON.stringify(dump, null, 2)); console.log('meta', JSON.stringify(dump).slice(0, 300)); }
 const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('export-midi').click()]);
 await dl.saveAs(`${outDir}/${name}.mid`);
 console.log('midi:', dl.suggestedFilename());
