@@ -28,3 +28,4 @@ web/public/ort/*.mjs
 /models-v2
 web/public/models/
 lyrics/
+!web/public/samples/**/*.mp3

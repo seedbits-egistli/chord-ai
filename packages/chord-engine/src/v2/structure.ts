@@ -104,6 +104,11 @@ export function analyzeStructure(
   lines: LyricLineTiming[], notes: MelodyNote[],
 ): StructureResult {
   const duration = mix22k.length / SR;
+  {
+    const spans = lines.map((l) => l.end - l.start).sort((x, y) => x - y);
+    const med = spans[spans.length >> 1] ?? 4;
+    lines = lines.filter((l) => l.end - l.start <= Math.max(8, 2.5 * med));
+  }
   const bars = barGrid(beats, downbeats, duration);
   const B = bars.length - 1;
   const ff = frameFeatures(mix22k);
@@ -295,19 +300,46 @@ export function analyzeStructure(
   }
   // a lone vocal segment right before a chorus whose music matches other verses stays verse; unique ones → bridge
   for (let i = 0; i < n; i++) if (grp[i]! < 0) grp[i] = g++;
-  // ---- merge adjacent segments of the same kind & group
-  const merged: { a: number; b: number; kind: SectionKind; grp: number; lyrics: string[]; vocal: number }[] = [];
-  for (let i = 0; i < n; i++) {
-    const p = merged[merged.length - 1];
-    const inst = ['intro', 'outro', 'interlude'].includes(kind[i]!);
-    // vocal sections merge only within one lyric paragraph (or, without lyrics, up to 16 bars of the same group)
-    const vocalMerge = p && p.grp === grp[i] && p.kind !== 'chorus' && (hasLyrics ? !para.has(info[i]!.a) : info[i]!.b - p.a <= 16);
-    if (p && p.kind === kind[i] && (inst || vocalMerge)) {
-      p.vocal = (p.vocal * (p.b - p.a) + info[i]!.vocal * (info[i]!.b - info[i]!.a)) / (info[i]!.b - p.a);
-      p.b = info[i]!.b; p.lyrics.push(...info[i]!.lyrics); continue;
+  // ---- coarse structure: merge adjacent same-kind segments (verse ×2 → one 主歌), then absorb short pieces
+  const isInst = (k: SectionKind) => k === 'intro' || k === 'outro' || k === 'interlude';
+  type M = { a: number; b: number; kind: SectionKind; grp: number; lyrics: string[]; vocal: number };
+  let merged: M[] = info.map((x, i) => ({ a: x.a, b: x.b, kind: kind[i]!, grp: grp[i]!, lyrics: [...x.lyrics], vocal: x.vocal }));
+  const join = (p: M, q: M): M => ({
+    a: p.a, b: q.b, kind: p.kind, grp: p.grp, lyrics: [...p.lyrics, ...q.lyrics],
+    vocal: (p.vocal * (p.b - p.a) + q.vocal * (q.b - q.a)) / (q.b - p.a),
+  });
+  const mergeSame = () => {
+    const out: M[] = [];
+    for (const m of merged) {
+      const p = out[out.length - 1];
+      if (p && p.kind === m.kind && (isInst(m.kind) || bars[m.b]! - bars[p.a]! <= 70)) out[out.length - 1] = join(p, m); else out.push(m);
     }
-    merged.push({ a: info[i]!.a, b: info[i]!.b, kind: kind[i]!, grp: grp[i]!, lyrics: [...info[i]!.lyrics], vocal: info[i]!.vocal });
+    merged = out;
+  };
+  const blockSim = (x: M, y: M) => { let s = 0, c = 0; for (let i = x.a; i < x.b; i++) for (let j = y.a; j < y.b; j++) { s += S[i]![j]!; c++; } return c ? s / c : 0; };
+  mergeSame();
+  // minimum lengths: vocal sections ≥ 8 bars, instrumental ≥ 2 bars; the shortest offender goes to its most similar neighbour
+  const dur = (m: M) => bars[m.b]! - bars[m.a]!;
+  const minLen = (m: M) => (isInst(m.kind) ? 4 : 11.5);
+  for (;;) {
+    let worst = -1;
+    for (let i = 0; i < merged.length; i++) {
+      const m = merged[i]!;
+      if (dur(m) < minLen(m) && merged.length > 1 && (worst < 0 || dur(m) < dur(merged[worst]!))) worst = i;
+    }
+    // too many sections overall → merge the shortest non-intro/outro anyway
+    if (worst < 0 && merged.length > 12) {
+      for (let i = 1; i < merged.length - 1; i++) if (worst < 0 || dur(merged[i]!) < dur(merged[worst]!)) worst = i;
+    }
+    if (worst < 0) break;
+    const m = merged[worst]!, L = merged[worst - 1], R = merged[worst + 1];
+    const toLeft = !R || (L && (isInst(m.kind) === isInst(L.kind) ? 1 : 0) + blockSim(m, L) >= (isInst(m.kind) === isInst(R.kind) ? 1 : 0) + blockSim(m, R));
+    if (toLeft) merged.splice(worst - 1, 2, join(L!, m)); else merged.splice(worst, 2, { ...join(m, R!), kind: R!.kind, grp: R!.grp });
+    mergeSame();
   }
+  // one group letter per kind for vocal sections so all 主歌 / 副歌 share a representative melody
+  const kindGrp = new Map<SectionKind, number>();
+  for (const m of merged) if (!isInst(m.kind)) { if (!kindGrp.has(m.kind)) kindGrp.set(m.kind, m.grp); m.grp = kindGrp.get(m.kind)!; }
   // group letters (A, B, …) by first appearance; per-kind ordinals
   const letter = new Map<number, string>();
   const counts: Partial<Record<SectionKind, number>> = {};
