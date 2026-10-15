@@ -59,6 +59,7 @@ export async function analyzeSong(samples: Float32Array, sampleRate: number, lyr
   const voc = new Float32Array(n);
   for (let i = 0; i < n; i++) voc[i] = (stems.vocals.left[i]! + stems.vocals.right[i]!) / 2;
   const voc16k = resample(voc, stems.sampleRate, 16000);
+  (globalThis as unknown as { __saVoc16k?: Float32Array }).__saVoc16k = voc16k; // debug/verification hook
   emit('separate', 'done', 1); mark('separate');
 
   const bt = await beatsP;

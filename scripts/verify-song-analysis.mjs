@@ -25,6 +25,10 @@ await page.locator('.sa-sec').first().waitFor({ timeout: 1_200_000 });
 clearInterval(iv);
 console.error('done in', (Date.now() - t0) / 1000, 's');
 await page.evaluate(() => window.__saDump && window.__dump(JSON.stringify(window.__saDump())));
+if (process.env.DUMP_VOCALS) {
+  const b64 = await page.evaluate(() => { const v = globalThis.__saVoc16k; const u = new Uint8Array(v.buffer); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s); });
+  writeFileSync(`${outDir}/${name}.voc16k.f32`, Buffer.from(b64, 'base64'));
+}
 const secs = await page.locator('.sa-sec').evaluateAll((els) => els.map((e) => e.getAttribute('title')));
 console.log(secs.join('\n'));
 // play from the 3rd section, synth on
