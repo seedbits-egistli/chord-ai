@@ -496,3 +496,16 @@ textarea {
   .lc-cp { display: block; }
   .now-chord { font-size: 1.2rem; }
 }
+
+/* 歌曲分析 */
+.song-analysis .sa-controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.sa-sections { position: relative; display: flex; height: 40px; border-radius: 6px; overflow: hidden; margin: 8px 0; }
+.sa-sec { border: 0; border-right: 1px solid #fff; padding: 0 4px; cursor: pointer; color: #0f172a; font-size: 12px; opacity: 0.55; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sa-sec.active { opacity: 1; font-weight: 700; box-shadow: inset 0 -4px 0 #0f172a; }
+.sa-sec-head { position: absolute; top: 0; bottom: 0; width: 2px; background: #dc2626; pointer-events: none; }
+.sa-legend { display: flex; gap: 12px; font-size: 12px; margin-bottom: 6px; }
+.sa-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+.sa-roll { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; }
+.sa-playhead { position: absolute; top: 0; width: 2px; background: #dc2626; pointer-events: none; }
+.sa-note-hl { position: absolute; background: #f59e0b; border-radius: 2px; box-shadow: 0 0 8px #f59e0b; font-size: 9px; color: #000; overflow: visible; white-space: nowrap; pointer-events: none; }
+.sa-note-hl b { position: relative; top: -13px; }

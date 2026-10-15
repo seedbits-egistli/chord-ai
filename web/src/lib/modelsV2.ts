@@ -15,6 +15,8 @@ export const V2_MODELS = {
   w2v: { key: 'w2v', file: 'wav2vec2-base-960h-int8.onnx', label: 'wav2vec2（歌詞對齊）', approxMB: 95.2 },
   // HT-Demucs (MIT; ONNX export StemSplitio/htdemucs-onnx, MIT). Graph optimisation must stay off: constant folding inflates memory to GBs.
   htdemucs: { key: 'htdemucs', file: 'htdemucs_fp16weights.onnx', label: 'HT-Demucs（高品質分離）', approxMB: 165.6, noGraphOpt: true },
+  // CREPE small (MIT; marl/crepe weights, ONNX export yqzhishen/onnxcrepe v1.1.0, MIT). Vocal f0.
+  crepe: { key: 'crepe', file: 'crepe-small.onnx', label: 'CREPE small（旋律）', approxMB: 6.5 },
   w2vLabels: { key: 'w2vLabels', file: 'wav2vec2-labels.json', label: 'labels', approxMB: 0 },
 } as const satisfies Record<string, ModelSpec>;
 

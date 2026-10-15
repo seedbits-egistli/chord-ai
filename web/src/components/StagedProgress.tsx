@@ -1,6 +1,6 @@
 import { STAGE_LABEL, type StageState, type V2Stage } from '../lib/v2';
 
-const ORDER: V2Stage[] = ['download', 'separate', 'beats', 'chords', 'align'];
+const DEFAULT_ORDER: V2Stage[] = ['download', 'separate', 'beats', 'chords', 'align'];
 
 function fmtEta(s: number | null) {
   if (s == null || !Number.isFinite(s)) return '';
@@ -13,14 +13,16 @@ export function StagedProgress({
   stages,
   onCancel,
   running,
+  order = DEFAULT_ORDER,
 }: {
+  order?: V2Stage[];
   stages: Partial<Record<V2Stage, StageState>>;
   onCancel?: () => void;
   running: boolean;
 }) {
   return (
     <div className="stages" data-testid="staged-progress">
-      {ORDER.map((k) => {
+      {order.map((k) => {
         const s = stages[k];
         const status = s?.status ?? 'pending';
         const pct = Math.round((status === 'done' ? 1 : s?.progress ?? 0) * 100);

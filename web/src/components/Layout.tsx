@@ -10,8 +10,8 @@ export function Layout({ children }: { children: ReactNode }) {
           <span>音訊留在瀏覽器 · MIT 開源</span>
         </Link>
         <nav className="nav-links">
-          <Link to="/">辨識</Link>
-          <Link to="/search">搜尋樂譜</Link>
+          <Link to="/">歌曲分析</Link>
+          <Link to="/legacy">舊版和弦</Link>
         </nav>
       </header>
       {children}

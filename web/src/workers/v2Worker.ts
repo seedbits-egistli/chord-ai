@@ -10,6 +10,12 @@ import {
   btcNames,
   detectChordsBtc,
   separateHtdemucs,
+  crepePitch,
+  pitchToNotes,
+  analyzeStructure,
+  type MelodyNote,
+  type StructureResult,
+  type LyricLineTiming,
   toDetectionResult,
   trackBeatsBeatThis,
   type DetectionResult,
@@ -19,12 +25,14 @@ import { readOrtWorkerConfig } from '../lib/ortConfig';
 import { getCachedArrayBuffer, putArrayBuffer } from '../lib/assetCache';
 import { MODEL_BASE_URL, V2_MODELS, modelUrl, type ModelSpec } from '../lib/modelsV2';
 
-export type V2Stage = 'download' | 'separate' | 'beats' | 'chords' | 'align';
+export type V2Stage = 'download' | 'separate' | 'beats' | 'chords' | 'melody' | 'align' | 'structure';
 export type V2Request =
   | { type: 'beats'; id: number; mix22k: Float32Array }
   | { type: 'separate'; id: number; left: Float32Array; right: Float32Array }
   | { type: 'chords'; id: number; acc22k: Float32Array; beats: number[]; downbeats: number[] }
   | { type: 'align'; id: number; voc16k: Float32Array; lyrics: string }
+  | { type: 'melody'; id: number; voc16k: Float32Array; beats: number[] }
+  | { type: 'structure'; id: number; mix22k: Float32Array; voc16k: Float32Array; beats: number[]; downbeats: number[]; lines: LyricLineTiming[]; notes: MelodyNote[] }
   | { type: 'status'; id: number; withAlign: boolean };
 export type V2Response =
   | { id: number; type: 'stage'; stage: V2Stage; progress: number; detail: string; bytes?: { loaded: number; total: number } }
@@ -32,6 +40,8 @@ export type V2Response =
   | { id: number; type: 'beatsDone'; beats: number[]; downbeats: number[] }
   | { id: number; type: 'chordsDone'; result: DetectionResult; extra: { model: string; halfTime: boolean; downbeatsMs: number[] } }
   | { id: number; type: 'alignDone'; lines: { text: string; section: number }[]; words: { word: string; line: number; start: number; end: number; confidence: number }[] }
+  | { id: number; type: 'melodyDone'; notes: MelodyNote[]; f0: Float32Array; conf: Float32Array; hop: number }
+  | { id: number; type: 'structureDone'; result: StructureResult }
   | { id: number; type: 'status'; missingMB: number }
   | { id: number; type: 'error'; error: string };
 
@@ -171,6 +181,20 @@ self.onmessage = async (ev: MessageEvent<V2Request>) => {
         id: msg.id, type: 'chordsDone', result: toDetectionResult(r),
         extra: { model: r.model, halfTime: r.halfTime, downbeatsMs: r.downbeats.map((d) => Math.round(d * 1000)) },
       });
+      return;
+    }
+    if (msg.type === 'melody') {
+      await ensureModels(msg.id, [V2_MODELS.crepe]);
+      const run = await session(V2_MODELS.crepe);
+      const t = await crepePitch(msg.voc16k, run, stage('melody', '擷取旋律（CREPE）'));
+      const notes = pitchToNotes(t, msg.beats);
+      (self as unknown as Worker).postMessage({ id: msg.id, type: 'melodyDone', notes, f0: t.f0, conf: t.conf, hop: t.hop } satisfies V2Response, [t.f0.buffer, t.conf.buffer]);
+      return;
+    }
+    if (msg.type === 'structure') {
+      post({ id: msg.id, type: 'stage', stage: 'structure', progress: 0.1, detail: '切割段落' });
+      const result = analyzeStructure(msg.mix22k, msg.voc16k, msg.beats, msg.downbeats, msg.lines, msg.notes);
+      post({ id: msg.id, type: 'structureDone', result });
       return;
     }
     if (msg.type === 'align') {

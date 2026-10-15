@@ -13,7 +13,9 @@ export const STAGE_LABEL: Record<V2Stage, string> = {
   separate: '分離人聲',
   beats: '偵測節拍',
   chords: '辨識和弦',
+  melody: '擷取旋律',
   align: '對齊歌詞',
+  structure: '切割段落',
 };
 export interface StageState {
   stage: V2Stage;
@@ -70,10 +72,11 @@ export function separatorOverride(): Separator | null {
   return v === 'htdemucs' || v === 'umx' ? v : null;
 }
 let seq = 1;
+export const nextId = () => seq++;
 
 export class CancelledError extends Error { constructor() { super('已取消'); } }
 
-function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => void, signal?: AbortSignal, role: 'main' | 'sep' = 'main'): Promise<T> {
+export function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => void, signal?: AbortSignal, role: 'main' | 'sep' = 'main'): Promise<T> {
   const w = getWorker(role);
   return new Promise((resolve, reject) => {
     const abort = () => { cleanup(); workers[role]?.terminate(); workers[role] = null; reject(new CancelledError()); };
@@ -98,7 +101,7 @@ function rpc<T extends V2Response>(req: V2Request, onMsg: (m: V2Response) => voi
   });
 }
 
-class Eta {
+export class Eta {
   private t0 = performance.now();
   private p0 = 0;
   reset() { this.t0 = performance.now(); this.p0 = 0; }
