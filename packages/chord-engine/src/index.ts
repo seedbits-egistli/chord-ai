@@ -31,3 +31,5 @@ export * from './v2/beatThis.js';
 export * from './v2/ctcAlign.js';
 export * from './v2/lyricChart.js';
 export * from './v2/pipeline.js';
+export * from './v2/melody.js';
+export * from './v2/structure.js';

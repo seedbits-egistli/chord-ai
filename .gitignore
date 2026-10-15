@@ -25,6 +25,6 @@ docs/wonderwall-diagnosis-assets/plot.py
 /tmp/
 web/public/ort/*.wasm
 web/public/ort/*.mjs
-/models-v2/
+/models-v2
 web/public/models/
 lyrics/
