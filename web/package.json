@@ -18,7 +18,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.4.0",
-    "svguitar": "^2.4.1"
+    "svguitar": "^2.4.1",
+    "vexflow": "^4.2.5"
   },
   "devDependencies": {
     "@types/react": "^19.0.12",

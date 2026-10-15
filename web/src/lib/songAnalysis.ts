@@ -2,7 +2,7 @@
  * 歌曲分析 orchestration (all in-browser): UMX-HQ vocals ∥ Beat This! → CREPE melody → (lyrics) wav2vec2 alignment
  * → classical structure analysis. Progressive callbacks; cancel via AbortSignal. Audio never leaves the device.
  */
-import type { LyricLineTiming, MelodyNote, StructureResult } from '@chord-ai/engine';
+import { keyFromMelody, type LyricLineTiming, type MelodyNote, type StructureResult } from '@chord-ai/engine';
 import { resetSeparateWorker, separateInWorker } from './audio';
 import { CancelledError, Eta, nextId, resample, rpc, type AlignedLyrics, type StageState, type V2Stage } from './v2';
 import type { V2Response } from '../workers/v2Worker';
@@ -13,6 +13,7 @@ export interface SongAnalysis {
   beats: number[];
   downbeats: number[];
   notes: MelodyNote[];
+  key: string;
   lyrics: AlignedLyrics | null;
   structure: StructureResult | null;
   timings: Record<string, number>;
@@ -34,7 +35,7 @@ export async function analyzeSong(samples: Float32Array, sampleRate: number, lyr
     if (m.progress === 0) etaOf(m.stage).reset();
     emit(m.stage, m.progress >= 1 ? 'done' : 'active', m.progress, { detail: m.detail, bytes: m.bytes });
   };
-  const out: SongAnalysis = { duration: samples.length / sampleRate, beats: [], downbeats: [], notes: [], lyrics: null, structure: null, timings: {} };
+  const out: SongAnalysis = { duration: samples.length / sampleRate, beats: [], downbeats: [], notes: [], key: 'C', lyrics: null, structure: null, timings: {} };
   const mix22k = resample(samples, sampleRate, 22050);
   const beatsP = rpc<Extract<V2Response, { type: 'beatsDone' }>>({ type: 'beats', id: nextId(), mix22k: mix22k.slice() }, forward, signal);
   beatsP.catch(() => {});
@@ -69,6 +70,7 @@ export async function analyzeSong(samples: Float32Array, sampleRate: number, lyr
 
   const mel = await rpc<Extract<V2Response, { type: 'melodyDone' }>>({ type: 'melody', id: nextId(), voc16k: voc16k.slice(), beats: out.beats }, forward, signal);
   out.notes = mel.notes;
+  out.key = keyFromMelody(mel.notes);
   emit('melody', 'done', 1); mark('melody');
   h.onPartial({ ...out });
 

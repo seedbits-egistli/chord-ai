@@ -15,7 +15,7 @@ export interface Section {
   start: number; end: number; startBar: number; endBar: number;
   kind: SectionKind; label: string; group: string; vocal: number; lyrics: string[];
 }
-export interface RepNote { qOffset: number; qLen: number; midi: number; support: number }
+export interface RepNote { qOffset: number; qLen: number; midi: number; support: number; glideTo?: number; ticks: number }
 export interface StructureResult {
   sections: Section[];
   bars: number[];
@@ -354,8 +354,15 @@ export function analyzeStructure(
   return { sections, bars, novelty: nov, repMelody: representativeMelody(sections, notes, beats) };
 }
 
-/** Vote across repetitions of each group on a quarter-beat grid; keep cells voiced in ≥ half the occurrences. */
+/** Vote across repetitions of each group on a 16th-note grid; unify rhythm to ALLOWED_TICKS; keep glides. */
 export function representativeMelody(sections: Section[], notes: MelodyNote[], beats: number[]): Record<string, RepNote[]> {
+  const allowed = [1, 2, 3, 4, 6, 8];
+  const snapTicks = (raw: number) => {
+    if (raw > 8) return Math.min(16, Math.max(4, Math.round(raw / 4) * 4));
+    let best = 1, bd = Infinity;
+    for (const a of allowed) { const d = Math.abs(a - Math.max(1, raw)); if (d < bd) { best = a; bd = d; } }
+    return best;
+  };
   const qIndex = (t: number) => {
     let lo = 0, hi = beats.length - 1;
     if (t <= beats[0]!) return 0;
@@ -369,31 +376,62 @@ export function representativeMelody(sections: Section[], notes: MelodyNote[], b
   for (const [gname, occ] of byGroup) {
     const len = Math.min(...occ.map((s) => qIndex(s.end) - qIndex(s.start)));
     if (len <= 0) continue;
-    const votes: Map<number, number>[] = Array.from({ length: len }, () => new Map());
+    // onset voting: each note casts a vote at its snapped onset with (midi, ticks, glideTo)
+    type Vote = { midi: number; ticks: number; glideTo?: number };
+    const onsetVotes = new Map<number, Vote[]>();
     for (const s of occ) {
       const q0 = qIndex(s.start);
       for (const nt of notes) {
         if (nt.end <= s.start || nt.start >= s.end) continue;
-        for (let q = qIndex(nt.qStart) - q0; q < qIndex(nt.qEnd) - q0; q++) if (q >= 0 && q < len) votes[q]!.set(nt.midi, (votes[q]!.get(nt.midi) ?? 0) + 1);
+        const off = qIndex(nt.qStart) - q0;
+        if (off < 0 || off >= len) continue;
+        const ticks = snapTicks(nt.ticks || Math.max(1, qIndex(nt.qEnd) - qIndex(nt.qStart)));
+        const list = onsetVotes.get(off) ?? [];
+        list.push({ midi: nt.midi, ticks, glideTo: nt.glideTo });
+        onsetVotes.set(off, list);
       }
     }
-    const cell: { midi: number; sup: number }[] = votes.map((v) => {
-      let tot = 0; for (const c of v.values()) tot += c;
-      if (tot < occ.length / 2) return { midi: -1, sup: 0 };
-      // pitch-class tolerant: allow octave errors to vote together, report the most common octave
-      const pcv = new Map<number, number>();
-      for (const [m, c] of v) pcv.set(m % 12, (pcv.get(m % 12) ?? 0) + c);
-      let bp = 0, bc = -1; for (const [p, c] of pcv) if (c > bc) { bc = c; bp = p; }
-      let bm = 0, bmc = -1; for (const [m, c] of v) if (m % 12 === bp && c > bmc) { bmc = c; bm = m; }
-      return { midi: bm, sup: bc / occ.length };
-    });
+    // keep onsets that appear in ≥ half of occurrences (or ≥ 1 if only one occurrence)
+    const need = Math.max(1, Math.ceil(occ.length / 2));
+    const onsets = [...onsetVotes.entries()].filter(([, v]) => v.length >= need).sort((a, b) => a[0] - b[0]);
     const rn: RepNote[] = [];
-    for (let q = 0; q < len; q++) {
-      const c = cell[q]!;
-      if (c.midi < 0) continue;
-      const p = rn[rn.length - 1];
-      if (p && p.midi === c.midi && p.qOffset + p.qLen === q) { p.qLen++; p.support = Math.max(p.support, c.sup); continue; }
-      rn.push({ qOffset: q, qLen: 1, midi: c.midi, support: c.sup });
+    let cursor = 0;
+    for (const [off, votes] of onsets) {
+      // skip if overlaps previous note
+      if (off < cursor) continue;
+      // majority midi (pitch-class tolerant)
+      const pcv = new Map<number, number>();
+      for (const v of votes) pcv.set(v.midi % 12, (pcv.get(v.midi % 12) ?? 0) + 1);
+      let bp = 0, bc = -1; for (const [p, c] of pcv) if (c > bc) { bc = c; bp = p; }
+      const same = votes.filter((v) => v.midi % 12 === bp);
+      const midiCounts = new Map<number, number>();
+      for (const v of same) midiCounts.set(v.midi, (midiCounts.get(v.midi) ?? 0) + 1);
+      let midi = same[0]!.midi, mc = -1;
+      for (const [m, c] of midiCounts) if (c > mc) { mc = c; midi = m; }
+      // majority ticks
+      const tc = new Map<number, number>();
+      for (const v of same) tc.set(v.ticks, (tc.get(v.ticks) ?? 0) + 1);
+      let ticks = 2, tcc = -1;
+      for (const [t, c] of tc) if (c > tcc) { tcc = c; ticks = t; }
+      ticks = snapTicks(ticks);
+      // majority glide target (if ≥ half of votes have a glide)
+      const glides = same.filter((v) => v.glideTo != null);
+      let glideTo: number | undefined;
+      if (glides.length >= Math.ceil(same.length / 2)) {
+        const gc = new Map<number, number>();
+        for (const v of glides) gc.set(v.glideTo!, (gc.get(v.glideTo!) ?? 0) + 1);
+        let gbest = glides[0]!.glideTo!, gcc = -1;
+        for (const [g, c] of gc) if (c > gcc) { gcc = c; gbest = g; }
+        glideTo = gbest;
+      }
+      // don't overrun next onset or section end
+      const nextOff = onsets.find(([o]) => o > off)?.[0] ?? len;
+      ticks = Math.min(ticks, nextOff - off);
+      ticks = snapTicks(Math.max(1, ticks));
+      const note: RepNote = { qOffset: off, qLen: ticks, midi, support: same.length / occ.length, ticks };
+      if (glideTo != null && glideTo !== midi) note.glideTo = glideTo;
+      rn.push(note);
+      cursor = off + ticks;
     }
     out[gname] = rn;
   }
