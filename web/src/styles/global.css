@@ -509,3 +509,7 @@ textarea {
 .sa-playhead { position: absolute; top: 0; width: 2px; background: #dc2626; pointer-events: none; }
 .sa-note-hl { position: absolute; background: #f59e0b; border-radius: 2px; box-shadow: 0 0 8px #f59e0b; font-size: 9px; color: #000; overflow: visible; white-space: nowrap; pointer-events: none; }
 .sa-note-hl b { position: relative; top: -13px; }
+.sa-lyric-line { font-size: 22px; min-height: 34px; margin: 6px 0 10px; text-align: center; }
+.sa-lyric-line span { color: #94a3b8; transition: color .1s; }
+.sa-lyric-line span.past { color: #0f172a; }
+.sa-lyric-line span.cur { color: #ea580c; font-weight: 700; }

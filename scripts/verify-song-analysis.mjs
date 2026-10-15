@@ -33,7 +33,7 @@ const secs = await page.locator('.sa-sec').evaluateAll((els) => els.map((e) => e
 console.log(secs.join('\n'));
 // play from the 3rd section, synth on
 const third = page.locator('.sa-sec').nth(Math.min(2, secs.length - 1));
-await page.getByTestId('synth-toggle').check();
+await page.getByTestId('play-mode').selectOption('both');
 await third.click();
 await page.evaluate(() => { const a = document.querySelector('[data-testid=song-audio]'); a.muted = true; });
 await page.getByTestId('play').click();
@@ -43,4 +43,8 @@ await page.screenshot({ path: `${outDir}/${name}-playing.png`, fullPage: true })
 await page.getByTestId('rep-toggle').check();
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${outDir}/${name}-rep.png`, fullPage: true });
+const [dl] = await Promise.all([page.waitForEvent('download'), page.getByTestId('export-midi').click()]);
+await dl.saveAs(`${outDir}/${name}.mid`);
+console.log('midi:', dl.suggestedFilename());
+if (await page.getByTestId('lyric-line').count()) console.log('lyric line:', await page.getByTestId('lyric-line').innerText());
 await browser.close();

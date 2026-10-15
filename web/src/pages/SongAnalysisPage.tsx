@@ -4,7 +4,7 @@ import { decodeFile } from '../lib/audio';
 import { StagedProgress } from '../components/StagedProgress';
 import { CancelledError, type StageState, type V2Stage } from '../lib/v2';
 import { analyzeSong, SONG_STAGES, type SongAnalysis } from '../lib/songAnalysis';
-import { MelodySynth, type SynthNote } from '../lib/melodySynth';
+import { MelodySynth, melodyMidi, type SynthNote } from '../lib/melodySynth';
 
 export const KIND_COLOR: Record<SectionKind, string> = {
   intro: '#94a3b8', verse: '#60a5fa', prechorus: '#a78bfa', chorus: '#f97316', bridge: '#34d399', interlude: '#cbd5e1', outro: '#64748b', section: '#e2e8f0',
@@ -45,7 +45,10 @@ export function SongAnalysisPage() {
   const [audioUrl, setAudioUrl] = useState('');
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [synthOn, setSynthOn] = useState(false);
+  const [mode, setMode] = useState<'original' | 'both' | 'melody'>('original');
+  const synthOn = mode !== 'original';
+  const [origVol, setOrigVol] = useState(0.5);
+  const [melVol, setMelVol] = useState(0.8);
   const [showRep, setShowRep] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -102,6 +105,22 @@ export function SongAnalysisPage() {
     restart();
     return () => { a.removeEventListener('play', onPlay); a.removeEventListener('pause', onPause); a.removeEventListener('seeked', restart); };
   }, [synthOn, showRep, audioUrl, res]);
+  useEffect(() => { const a = audioRef.current; if (a) a.volume = mode === 'melody' ? 0 : mode === 'both' ? origVol : 1; }, [mode, origVol, audioUrl]);
+  useEffect(() => { synthRef.current?.setVolume(melVol); }, [melVol]);
+  const exportMidi = () => {
+    if (!res) return;
+    const bytes = melodyMidi(showRep ? rep : res.notes, res.beats);
+    const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'audio/midi' }));
+    const el = document.createElement('a');
+    el.href = url; el.download = `${(file?.name ?? 'melody').replace(/\.[^.]+$/, '')}-melody.mid`; el.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  // current lyric line + word (karaoke)
+  const words = res?.lyrics?.words ?? [];
+  let wi = -1;
+  for (let i = 0; i < words.length; i++) if (words[i]!.start <= time + 0.05) wi = i; else break;
+  const curLine = wi >= 0 && time < words[wi]!.end + 4 ? words[wi]!.line : -1;
+  const lineWords = curLine >= 0 ? words.map((w, i) => ({ ...w, i })).filter((w) => w.line === curLine) : [];
 
   const notes = res?.notes ?? [];
   const range = useMemo(() => {
@@ -195,7 +214,14 @@ export function SongAnalysisPage() {
               {playing ? '⏸ 暫停' : '▶ 播放'}
             </button>
             <span data-testid="clock">{fmt(time)} / {fmt(dur)}</span>
-            <label><input type="checkbox" checked={synthOn} onChange={(e) => setSynthOn(e.target.checked)} data-testid="synth-toggle" /> 旋律合成音</label>
+            <label>播放：<select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} data-testid="play-mode">
+              <option value="original">原曲</option>
+              <option value="both">原曲＋旋律（鋼琴）</option>
+              <option value="melody">只有旋律（鋼琴）</option>
+            </select></label>
+            {mode === 'both' && <label>原曲音量 <input type="range" min={0} max={1} step={0.05} value={origVol} onChange={(e) => setOrigVol(+e.target.value)} data-testid="orig-vol" /></label>}
+            {synthOn && <label>旋律音量 <input type="range" min={0} max={1.5} step={0.05} value={melVol} onChange={(e) => setMelVol(+e.target.value)} data-testid="mel-vol" /></label>}
+            <button type="button" className="btn btn-secondary" onClick={exportMidi} data-testid="export-midi">匯出旋律 .mid</button>
             <label><input type="checkbox" checked={showRep} onChange={(e) => setShowRep(e.target.checked)} data-testid="rep-toggle" /> 段落代表旋律（重複投票）</label>
             <span className="muted" data-testid="now">
               {cur ? `目前：${cur.label}` : ''}{curNote ? ` · ${midiName(curNote.midi)}` : ''}
@@ -213,6 +239,13 @@ export function SongAnalysisPage() {
             <div className="sa-sec-head" style={{ left: `${(time / dur) * 100}%` }} />
           </div>
           {!res.structure && <p className="muted">段落分析中…</p>}
+          {res.lyrics && (
+            <div className="sa-lyric-line" data-testid="lyric-line">
+              {lineWords.length ? lineWords.map((w) => (
+                <span key={w.i} className={w.i === wi ? 'cur' : w.i < wi ? 'past' : ''}>{w.word} </span>
+              )) : <span className="muted">♪</span>}
+            </div>
+          )}
           <div className="sa-legend">
             {(Object.keys(SECTION_LABEL) as SectionKind[]).filter((k) => sections.some((s) => s.kind === k)).map((k) => (
               <span key={k}><i style={{ background: KIND_COLOR[k] }} />{SECTION_LABEL[k]}</span>
