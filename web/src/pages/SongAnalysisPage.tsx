@@ -56,6 +56,7 @@ export function SongAnalysisPage() {
   const rep = useMemo(() => (res ? repNotesAbs(res) : []), [res]);
   const synthNotes = useRef<SynthNote[]>([]);
   synthNotes.current = showRep ? rep : res?.notes ?? [];
+  (window as unknown as { __saDump?: () => unknown }).__saDump = () => res;
 
   async function run() {
     if (!file) return;

@@ -77,7 +77,10 @@ export async function analyzeSong(samples: Float32Array, sampleRate: number, lyr
     out.lyrics = { lines: ar.lines, words: ar.words };
     lines = ar.lines.map((l, i) => {
       const ws = ar.words.filter((w) => w.line === i);
-      return { text: l.text, paragraph: l.section, start: ws[0]?.start ?? 0, end: ws[ws.length - 1]?.end ?? 0 };
+      // CTC can stretch a line's first word across an instrumental gap: start after the last > 1.5 s intra-line gap
+      let k = 0;
+      for (let j = 1; j < ws.length; j++) if (ws[j]!.start - ws[j - 1]!.end > 1.5) k = j;
+      return { text: l.text, paragraph: l.section, start: ws[k]?.start ?? 0, end: ws[ws.length - 1]?.end ?? 0 };
     }).filter((l) => l.end > l.start);
     emit('align', 'done', 1); mark('align');
     h.onPartial({ ...out });

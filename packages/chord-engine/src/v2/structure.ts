@@ -254,12 +254,17 @@ export function analyzeStructure(
       if (e > bestE) { bestE = e; chorusG = k; }
     }
   }
-  // remaining vocal segments with distinct lyrics: musically similar → verse group, else bridge
+  // remaining vocal segments with distinct lyrics default to 主歌 (verse); 橋段 only when musically unlike every
+  // other vocal segment (bottom 35% of the song's similarity distribution) and after the first chorus.
   const verseG = g++;
+  const lowThr = off[Math.floor(off.length * 0.35)] ?? 0.5;
+  const firstChorus = info.findIndex((_, i) => grp[i] === chorusG);
   const rest = info.map((_, i) => i).filter((i) => isVocal(i) && grp[i]! < 0);
   for (const i of rest) {
-    const sim = rest.some((j) => j !== i && musicSim(i, j) > mThr);
-    if (sim) grp[i] = verseG;
+    const others = info.map((_, j) => j).filter((j) => j !== i && isVocal(j));
+    const maxSim = Math.max(-1, ...others.map((j) => musicSim(i, j)));
+    const bridge = hasLyrics ? maxSim < lowThr && firstChorus >= 0 && i > firstChorus : maxSim < mThr;
+    if (!bridge) grp[i] = verseG;
   }
   for (let i = 0; i < n; i++) {
     if (!isVocal(i)) {
