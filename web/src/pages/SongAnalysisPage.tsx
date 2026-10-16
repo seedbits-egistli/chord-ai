@@ -52,6 +52,10 @@ export function SongAnalysisPage() {
   const [melVol, setMelVol] = useState(0.8);
   const [showRep, setShowRep] = useState(false);
   const [view, setView] = useState<'roll' | 'staff'>('roll');
+  const [melMode, setMelMode] = useState<'clean' | 'raw'>('clean');
+  const useClean = melMode === 'clean' && !!res?.cleanNotes?.length;
+  const shownNotes = useMemo(() => (useClean ? res!.cleanNotes : res?.notes ?? []), [useClean, res]);
+  const shownKey = (useClean ? res?.cleanKey : res?.key) ?? 'C';
   const abortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -60,8 +64,9 @@ export function SongAnalysisPage() {
 
   const rep = useMemo(() => (res ? repNotesAbs(res) : []), [res]);
   const synthNotes = useRef<SynthNote[]>([]);
-  synthNotes.current = showRep ? rep : res?.notes ?? [];
-  (window as unknown as { __saDump?: () => unknown }).__saDump = () => res;
+  synthNotes.current = showRep ? rep : shownNotes;
+  (window as unknown as { __saDump?: () => unknown }).__saDump = () => (res ? { ...res, track: undefined } : res);
+  (window as unknown as { __saTrack?: () => unknown }).__saTrack = () => (res?.track ? { hop: res.track.hop, f0: Array.from(res.track.f0), conf: Array.from(res.track.conf) } : null);
   (window as unknown as { __saLoad?: (a: SongAnalysis) => void }).__saLoad = (a) => setRes(a); // test hook: render a saved analysis
 
   async function run() {
@@ -112,7 +117,7 @@ export function SongAnalysisPage() {
   useEffect(() => { synthRef.current?.setVolume(melVol); }, [melVol]);
   const exportMidi = () => {
     if (!res) return;
-    const bytes = melodyMidi(showRep ? rep : res.notes, res.beats);
+    const bytes = melodyMidi(showRep ? rep : shownNotes, res.beats);
     const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'audio/midi' }));
     const el = document.createElement('a');
     el.href = url; el.download = `${(file?.name ?? 'melody').replace(/\.[^.]+$/, '')}-melody.mid`; el.click();
@@ -125,7 +130,7 @@ export function SongAnalysisPage() {
   const curLine = wi >= 0 && time < words[wi]!.end + 4 ? words[wi]!.line : -1;
   const lineWords = curLine >= 0 ? words.map((w, i) => ({ ...w, i })).filter((w) => w.line === curLine) : [];
 
-  const notes = res?.notes ?? [];
+  const notes = shownNotes;
   const range = useMemo(() => {
     if (!notes.length) return { lo: 48, hi: 72 };
     const ms = notes.map((n) => n.midi).sort((a, b) => a - b);
@@ -159,7 +164,7 @@ export function SongAnalysisPage() {
       g.lineWidth = 1;
     }
     g.font = '9px system-ui';
-    for (const n of res.notes) {
+    for (const n of notes) {
       const x = X0 + n.start * PX_PER_SEC, w = Math.max(2, (n.end - n.start) * PX_PER_SEC);
       g.fillStyle = `rgba(37,99,235,${0.35 + 0.6 * n.conf})`;
       if (n.glideTo != null && n.glideTo !== n.midi) {
@@ -191,7 +196,7 @@ export function SongAnalysisPage() {
         lastX = Math.max(lastX, x + tw + 3);
       }
     }
-  }, [res, W, H, range, showRep, rep]);
+  }, [res, W, H, range, showRep, rep, notes]);
 
   // auto-scroll the roll to follow the playhead
   useEffect(() => {
@@ -236,11 +241,15 @@ export function SongAnalysisPage() {
             {synthOn && <label>旋律音量 <input type="range" min={0} max={1.5} step={0.05} value={melVol} onChange={(e) => setMelVol(+e.target.value)} data-testid="mel-vol" /></label>}
             <button type="button" className="btn btn-secondary" onClick={exportMidi} data-testid="export-midi">匯出旋律 .mid</button>
             <label><input type="checkbox" checked={showRep} onChange={(e) => setShowRep(e.target.checked)} data-testid="rep-toggle" /> 段落代表旋律（重複投票）</label>
+            <label>旋律：<select value={melMode} onChange={(e) => setMelMode(e.target.value as 'clean' | 'raw')} data-testid="melody-mode">
+              <option value="clean">整理後</option>
+              <option value="raw">原始偵測</option>
+            </select></label>
             <span className="sa-view-toggle" role="group" aria-label="顯示方式">
               <button type="button" className={`btn ${view === 'roll' ? '' : 'btn-secondary'}`} onClick={() => setView('roll')} data-testid="view-roll">鋼琴捲簾</button>
               <button type="button" className={`btn ${view === 'staff' ? '' : 'btn-secondary'}`} onClick={() => setView('staff')} data-testid="view-staff">五線譜</button>
             </span>
-            <span className="muted" data-testid="key-sig">調性：{res.key ?? 'C'}</span>
+            <span className="muted" data-testid="key-sig">調性：{shownKey}</span>
             <span className="muted" data-testid="now">
               {cur ? `目前：${cur.label}` : ''}{curNote ? ` · ${midiName(curNote.midi)}${curNote.glideTo != null && curNote.glideTo !== curNote.midi ? `→${midiName(curNote.glideTo)}（滑音）` : ''}` : ''}
             </span>
@@ -271,9 +280,9 @@ export function SongAnalysisPage() {
           </div>
           {view === 'staff' && (
             <StaffMelodyView
-              notes={(showRep ? rep : res.notes).map((n) => ({ ...n, conf: 1, qStart: n.start, qEnd: n.end, ticks: 'ticks' in n ? (n as { ticks: number }).ticks : 0 }))}
+              notes={(showRep ? rep : shownNotes).map((n) => ({ ...n, conf: 1, qStart: n.start, qEnd: n.end, ticks: 'ticks' in n ? (n as { ticks: number }).ticks : 0 }))}
               bars={res.structure?.bars ?? res.downbeats}
-              keySig={res.key ?? 'C'}
+              keySig={shownKey}
               sections={sections}
               words={res.lyrics?.words ?? []}
               time={time}

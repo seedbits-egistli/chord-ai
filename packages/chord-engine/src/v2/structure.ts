@@ -22,6 +22,8 @@ export interface StructureResult {
   novelty: number[];
   /** Representative melody per group, in quarter-beat units from the section start. */
   repMelody: Record<string, RepNote[]>;
+  /** Accompaniment (mix − vocals) chroma per beat interval, max-normalised per beat (12 × beats.length−1, flat). */
+  accChroma?: number[];
 }
 export interface LyricLineTiming { text: string; paragraph: number; start: number; end: number }
 
@@ -434,6 +436,27 @@ export function representativeMelody(sections: Section[], notes: MelodyNote[], b
       cursor = off + ticks;
     }
     out[gname] = rn;
+  }
+  return out;
+}
+
+
+/** Accompaniment chroma per beat: (mix22k − vocals) → frame chroma → mean per beat, max-normalised. */
+export function accompanimentBeatChroma(mix22k: Float32Array, voc16k: Float32Array, beats: number[]): number[] {
+  const acc = new Float32Array(mix22k.length);
+  const r = 16000 / SR;
+  for (let i = 0; i < acc.length; i++) {
+    const p = i * r, a = Math.floor(p), f = p - a;
+    acc[i] = mix22k[i]! - ((voc16k[a] ?? 0) * (1 - f) + (voc16k[a + 1] ?? 0) * f);
+  }
+  const ff = frameFeatures(acc);
+  const out: number[] = [];
+  for (let b = 0; b + 1 < beats.length; b++) {
+    const f0 = Math.floor((beats[b]! * SR) / HOP), f1 = Math.max(f0 + 1, Math.floor((beats[b + 1]! * SR) / HOP));
+    const c = new Array<number>(12).fill(0);
+    for (let f = f0; f < Math.min(f1, ff.nF); f++) for (let k = 0; k < 12; k++) c[k] += ff.chroma[f * 12 + k]!;
+    const mx = Math.max(1e-9, ...c);
+    for (let k = 0; k < 12; k++) out.push(c[k]! / mx);
   }
   return out;
 }

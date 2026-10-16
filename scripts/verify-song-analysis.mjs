@@ -43,9 +43,19 @@ await page.screenshot({ path: `${outDir}/${name}-playing.png`, fullPage: true })
 await page.getByTestId('rep-toggle').check();
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${outDir}/${name}-rep.png`, fullPage: true });
+await page.getByTestId('rep-toggle').uncheck();
 await page.getByTestId('view-staff').click();
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${outDir}/${name}-staff.png`, fullPage: true });
+await page.getByTestId('staff-view').screenshot({ path: `${outDir}/${name}-staff-clean.png` });
+if (await page.getByTestId('melody-mode').count()) {
+  await page.getByTestId('melody-mode').selectOption('raw');
+  await page.waitForTimeout(1500);
+  await page.getByTestId('staff-view').screenshot({ path: `${outDir}/${name}-staff-raw.png` });
+  await page.getByTestId('melody-mode').selectOption('clean');
+  const tr = await page.evaluate(() => window.__saTrack?.());
+  if (tr) writeFileSync(`${outDir}/${name}.track.json`, JSON.stringify(tr));
+}
 await page.getByTestId('view-roll').click();
 await page.waitForTimeout(500);
 await page.screenshot({ path: `${outDir}/${name}-roll.png`, fullPage: true });

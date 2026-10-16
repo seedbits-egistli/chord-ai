@@ -13,6 +13,7 @@ import {
   crepePitch,
   pitchToNotes,
   analyzeStructure,
+  accompanimentBeatChroma,
   type MelodyNote,
   type StructureResult,
   type LyricLineTiming,
@@ -194,6 +195,7 @@ self.onmessage = async (ev: MessageEvent<V2Request>) => {
     if (msg.type === 'structure') {
       post({ id: msg.id, type: 'stage', stage: 'structure', progress: 0.1, detail: '切割段落' });
       const result = analyzeStructure(msg.mix22k, msg.voc16k, msg.beats, msg.downbeats, msg.lines, msg.notes);
+      result.accChroma = accompanimentBeatChroma(msg.mix22k, msg.voc16k, msg.beats);
       post({ id: msg.id, type: 'structureDone', result });
       return;
     }
