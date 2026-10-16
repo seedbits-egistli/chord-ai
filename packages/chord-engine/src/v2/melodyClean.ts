@@ -184,8 +184,17 @@ export function cleanMelody(inp: CleanInput): CleanResult {
     if (nextT > qStart) qEnd = Math.min(qEnd, nextT);
     const ticks = quantizeTicks(qStart, qEnd, beats);
     qEnd = Math.min(addTicks(qStart, ticks, beats), nextT > qStart ? nextT : Infinity);
-    if (out.length && out[out.length - 1]!.qStart >= qStart - 1e-4) continue; // same snapped onset
-    out.push({ start: qStart, end: qEnd, qStart, qEnd, midi: m, conf: s.conf, ticks, lyric: s.lyric });
+    let qs = qStart, qe = qEnd, tk = ticks;
+    const prev = out[out.length - 1];
+    if (prev && prev.qStart >= qs - 1e-4) {
+      // two syllables snapped to one 16th: push this one a 16th later (keeps every word on its own note)
+      qs = addTicks(prev.qStart, 1, beats);
+      if (qs >= s.t1 + 0.1 || (nextT !== Infinity && qs >= nextT - 1e-4)) { if (s.lyric && prev.lyric) prev.lyric += ' ' + s.lyric; continue; }
+      prev.qEnd = prev.end = qs; prev.ticks = 1;
+      tk = quantizeTicks(qs, Math.max(qe, addTicks(qs, 1, beats)), beats);
+      qe = Math.min(addTicks(qs, tk, beats), nextT > qs ? nextT : Infinity);
+    } else if (prev && prev.qEnd > qs) { prev.qEnd = prev.end = qs; prev.ticks = quantizeTicks(prev.qStart, qs, beats); }
+    out.push({ start: qs, end: qe, qStart: qs, qEnd: qe, midi: m, conf: s.conf, ticks: tk, lyric: s.lyric });
   }
 
   // ---- 5. section consensus (pitch per 16th offset from section start)

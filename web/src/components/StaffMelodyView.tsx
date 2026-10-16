@@ -83,6 +83,18 @@ function buildMeasures(notes: MelodyNote[], bars: number[], sections: Section[],
   }
   // lyrics: each word → the single note with nearest onset (≤ 0.4 s); a note keeps all words it receives
   const allNotes = ms.flatMap((m) => m.events.filter((e) => !e.rest));
+  // 整理後 notes carry their own syllable: use it directly instead of nearest-onset matching
+  const own = notes.some((n) => (n as MelodyNote & { lyric?: string }).lyric);
+  if (own) {
+    for (const n of notes) {
+      const ly = (n as MelodyNote & { lyric?: string }).lyric;
+      if (!ly) continue;
+      let best: Ev | null = null, bd = 0.2;
+      for (const e of allNotes) { const d = Math.abs(e.t0 - n.start); if (d < bd) { bd = d; best = e; } }
+      if (best) best.lyric = best.lyric ? `${best.lyric} ${ly}` : ly;
+    }
+    words = [];
+  }
   for (const w of words) {
     let best: Ev | null = null, bd = 0.4;
     for (const e of allNotes) { const d = Math.abs(e.t0 - w.start); if (d < bd) { bd = d; best = e; } }
