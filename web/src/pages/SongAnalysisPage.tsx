@@ -62,6 +62,7 @@ export function SongAnalysisPage() {
   const synthNotes = useRef<SynthNote[]>([]);
   synthNotes.current = showRep ? rep : res?.notes ?? [];
   (window as unknown as { __saDump?: () => unknown }).__saDump = () => res;
+  (window as unknown as { __saLoad?: (a: SongAnalysis) => void }).__saLoad = (a) => setRes(a); // test hook: render a saved analysis
 
   async function run() {
     if (!file) return;

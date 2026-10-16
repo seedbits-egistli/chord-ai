@@ -1,9 +1,10 @@
 /**
- * VexFlow (MIT) staff view of the melody: key/time signatures, quantized notes + rests, lyrics under notes,
- * section labels above, glides as slur + ornament. Highlights the current measure/note and auto-scrolls.
+ * VexFlow (MIT) staff view, laid out like printed sheet music: systems wrap downward, measure width follows content
+ * (note count + measured lyric width), clef + key at each system start, section labels above section starts,
+ * beams per beat, dense measures simplified to an 8th grid. Playback highlights measure + note and scrolls vertically.
  */
-import { useEffect, useMemo, useRef } from 'react';
-import { Renderer, StaveNote, Voice, Formatter, Stave, Beam, StaveTie, Annotation, Accidental } from 'vexflow';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Renderer, StaveNote, Voice, Formatter, Stave, Beam, Annotation, Accidental, Fraction, StaveTie } from 'vexflow';
 import { midiToVex, type MelodyNote, type Section } from '@chord-ai/engine';
 
 export interface StaffWord { word: string; start: number; end: number }
@@ -15,223 +16,210 @@ export interface StaffMelodyViewProps {
   sections: Section[];
   words?: StaffWord[];
   time: number;
-  widthPerBar?: number;
 }
 
-const DUR: Record<number, string> = {
-  1: '16', 2: '8', 3: '8d', 4: 'q', 6: 'qd', 8: 'h', 12: 'hd', 16: 'w',
-};
+const DUR: Record<number, string> = { 1: '16', 2: '8', 3: '8d', 4: 'q', 6: 'qd', 8: 'h', 12: 'hd', 16: 'w' };
+const SIZES = [16, 12, 8, 6, 4, 3, 2, 1];
+const MIN_W: Record<number, number> = { 1: 20, 2: 24, 3: 28, 4: 32, 6: 36, 8: 40, 12: 44, 16: 48 };
+const LYRIC_FONT = '13px Arial, sans-serif';
+const STAVE_H = 150; // vertical space per system (staff + lyrics + label)
 
-function vexKey(key: string): string {
-  // VexFlow wants "C", "Am", "Bb", "F#m"
-  return key.replace('♯', '#').replace('♭', 'b');
-}
+type Ev = { rest: boolean; ticks: number; midi?: number; glideTo?: number; lyric?: string; t0: number; t1: number };
+interface Measure { i: number; start: number; end: number; events: Ev[]; section?: string; minW: number }
 
-function ticksOf(n: MelodyNote): number {
-  if (n.ticks && n.ticks > 0) return n.ticks;
-  return 2;
-}
-
-function fillMeasure(notes: MelodyNote[], barStart: number, barEnd: number, key: string): { kind: 'n' | 'r'; ticks: number; midi?: number; glideTo?: number; lyric?: string; note?: MelodyNote }[] {
-  const inBar = notes.filter((n) => n.qStart < barEnd - 1e-4 && n.qEnd > barStart + 1e-4)
-    .map((n) => ({ ...n, qStart: Math.max(n.qStart, barStart), qEnd: Math.min(n.qEnd, barEnd) }))
-    .sort((a, b) => a.qStart - b.qStart);
-  const out: { kind: 'n' | 'r'; ticks: number; midi?: number; glideTo?: number; lyric?: string; note?: MelodyNote }[] = [];
-  // Convert absolute times to 16th ticks within the bar (assume 4/4 → 16 ticks)
-  const barDur = barEnd - barStart;
-  const toTicks = (t: number) => Math.round(((t - barStart) / barDur) * 16);
-  let cursor = 0;
-  for (const n of inBar) {
-    let on = toTicks(n.qStart);
-    let off = Math.max(on + 1, toTicks(n.qEnd));
-    if (on < cursor) on = cursor;
-    if (on > cursor) {
-      // rest
-      let gap = on - cursor;
-      while (gap > 0) {
-        const take = [16, 12, 8, 6, 4, 3, 2, 1].find((t) => t <= gap && (cursor % t === 0 || t === 1)) ?? 1;
-        out.push({ kind: 'r', ticks: take });
-        gap -= take; cursor += take;
-      }
-    }
-    let rem = Math.min(off, 16) - cursor;
-    if (rem <= 0) continue;
-    // prefer the note's quantized ticks, clipped to remaining
-    const pref = Math.min(rem, ticksOf(n));
-    const take = [16, 12, 8, 6, 4, 3, 2, 1].find((t) => t <= pref && (t === pref || cursor % Math.min(t, 4) === 0)) ?? Math.min(rem, 1);
-    out.push({ kind: 'n', ticks: take, midi: n.midi, glideTo: n.glideTo, note: n });
-    cursor += take;
-  }
-  while (cursor < 16) {
-    const gap = 16 - cursor;
-    const take = [16, 12, 8, 6, 4, 3, 2, 1].find((t) => t <= gap && (cursor % t === 0 || t === 1)) ?? 1;
-    out.push({ kind: 'r', ticks: take });
-    cursor += take;
-  }
-  void key;
-  return out;
-}
-
-export function StaffMelodyView({ notes, bars, keySig, timeSig = '4/4', sections, words = [], time, widthPerBar = 220 }: StaffMelodyViewProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const noteEls = useRef<{ el: SVGElement | null; start: number; end: number }[]>([]);
-  const measureEls = useRef<SVGRectElement[]>([]);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const measureStarts = useMemo(() => bars.slice(0, -1).map((b, i) => ({ start: b, end: bars[i + 1]!, i })), [bars]);
-  const curMeasure = measureStarts.findIndex((m) => time >= m.start && time < m.end);
-
-  // attach lyrics to notes by nearest start
-  const notesWithLyric = useMemo(() => {
-    if (!words.length) return notes;
-    return notes.map((n) => {
-      let best: StaffWord | null = null, bd = 0.35;
-      for (const w of words) {
-        const d = Math.abs(w.start - n.start);
-        if (d < bd) { bd = d; best = w; }
-      }
-      return best ? { ...n, _lyric: best.word } : n;
-    });
-  }, [notes, words]);
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host || measureStarts.length === 0) return;
-    host.innerHTML = '';
-    const totalW = measureStarts.length * widthPerBar + 40;
-    const height = 180;
-    const renderer = new Renderer(host, Renderer.Backends.SVG);
-    renderer.resize(totalW, height);
-    const ctx = renderer.getContext();
-    const key = vexKey(keySig);
-    const vfNotes: StaveNote[] = [];
-    const ties: { from: StaveNote; to: StaveNote }[] = [];
-    let x = 10;
-    measureStarts.forEach((m, mi) => {
-      const stave = new Stave(x, 30, widthPerBar);
-      if (mi === 0) {
-        stave.addClef('treble');
-        stave.addKeySignature(key.endsWith('m') ? relMajor(key) : key);
-        stave.addTimeSignature(timeSig);
-      }
-      const sec = sections.find((s) => s.start <= m.start + 0.05 && s.end > m.start + 0.05);
-      if (sec && Math.abs(sec.start - m.start) < (m.end - m.start) * 0.6) {
-        stave.setText(sec.label, StaveModifierPositionTop());
-      }
-      stave.setContext(ctx).draw();
-      const events = fillMeasure(notesWithLyric as MelodyNote[], m.start, m.end, key);
-      const staveNotes: StaveNote[] = [];
-      for (const e of events) {
-        if (e.kind === 'r') {
-          const sn = new StaveNote({ keys: ['b/4'], duration: (DUR[e.ticks] ?? 'q') + 'r', clef: 'treble' });
-          staveNotes.push(sn);
-        } else {
-          const keys = [midiToVex(e.midi!, key)];
-          const sn = new StaveNote({ keys, duration: DUR[e.ticks] ?? 'q', clef: 'treble' });
-          // accidentals already in key name (c#, bb) — VexFlow parses them from the key string
-          const lyric = (e.note as MelodyNote & { _lyric?: string })?._lyric;
-          if (lyric) {
-            sn.addModifier(new Annotation(lyric).setVerticalJustification(Annotation.VerticalJustify.BOTTOM), 0);
-          }
-          if (e.glideTo != null && e.glideTo !== e.midi) {
-            sn.addModifier(new Annotation('⤵').setVerticalJustification(Annotation.VerticalJustify.TOP), 0);
-          }
-          staveNotes.push(sn);
-          (sn as StaveNote & { _t?: [number, number] })._t = [e.note!.qStart, e.note!.qEnd];
-          if (e.glideTo != null) {
-            // slur will be added if we have a next note; mark for pairing
-            (sn as StaveNote & { _glide?: boolean })._glide = true;
-          }
-        }
-      }
-      // pair glides: slur from a glide-marked note to the next note
-      for (let i = 0; i < staveNotes.length - 1; i++) {
-        const a = staveNotes[i] as StaveNote & { _glide?: boolean };
-        if (a._glide) ties.push({ from: a, to: staveNotes[i + 1]! });
-      }
-      try {
-        const voice = new Voice({ num_beats: 4, beat_value: 4 }).setStrict(false);
-        voice.addTickables(staveNotes);
-        Accidental.applyAccidentals([voice], key.replace(/m$/, '') === key ? key : relMajor(key));
-        new Formatter().joinVoices([voice]).formatToStave([voice], stave);
-        voice.draw(ctx, stave);
-        // beams for consecutive 8ths/16ths
-        const beamable: StaveNote[] = [];
-        const flush = () => {
-          if (beamable.length >= 2) {
-            try { new Beam(beamable.slice()).setContext(ctx).draw(); } catch { /* ignore */ }
-          }
-          beamable.length = 0;
-        };
-        for (const sn of staveNotes) {
-          const d = (sn as StaveNote & { getDuration(): string }).getDuration?.() ?? '';
-          if (/^[81]6?$|^8$|^16$/.test(d) && !sn.isRest()) beamable.push(sn);
-          else flush();
-        }
-        flush();
-      } catch (err) {
-        console.warn('[staff]', mi, err);
-      }
-      vfNotes.push(...staveNotes);
-      x += widthPerBar;
-    });
-    for (const t of ties) {
-      try { new StaveTie({ first_note: t.from, last_note: t.to, first_indices: [0], last_indices: [0] }).setContext(ctx).draw(); } catch { /* ignore */ }
-    }
-    // measure highlight rects (behind notes) + note element index for playback highlight
-    const svg = host.querySelector('svg');
-    measureEls.current = [];
-    if (svg) {
-      measureStarts.forEach((_, mi) => {
-        const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        r.setAttribute('x', String(10 + mi * widthPerBar)); r.setAttribute('y', '20');
-        r.setAttribute('width', String(widthPerBar)); r.setAttribute('height', '140');
-        r.setAttribute('fill', 'rgba(249,115,22,0.14)'); r.setAttribute('visibility', 'hidden');
-        svg.insertBefore(r, svg.firstChild);
-        measureEls.current.push(r);
-      });
-    }
-    noteEls.current = vfNotes
-      .filter((n) => (n as StaveNote & { _t?: [number, number] })._t)
-      .map((n) => { const t = (n as StaveNote & { _t: [number, number] })._t; return { el: (n.getSVGElement?.() ?? null) as SVGElement | null, start: t[0], end: t[1] }; });
-  }, [notesWithLyric, measureStarts, keySig, timeSig, sections, widthPerBar]);
-
-  // playback highlight: current measure + sounding note
-  useEffect(() => {
-    measureEls.current.forEach((r, i) => r.setAttribute('visibility', i === curMeasure ? 'visible' : 'hidden'));
-    for (const n of noteEls.current) {
-      if (!n.el) continue;
-      const on = time >= n.start && time < n.end;
-      n.el.classList.toggle('sa-staff-cur', on);
-    }
-  }, [time, curMeasure]);
-
-  // auto-scroll to current measure
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || curMeasure < 0) return;
-    const x = curMeasure * widthPerBar;
-    if (x < el.scrollLeft + 40 || x > el.scrollLeft + el.clientWidth - widthPerBar - 40) {
-      el.scrollLeft = Math.max(0, x - 80);
-    }
-  }, [curMeasure, widthPerBar]);
-
-  return (
-    <div className="sa-staff" ref={scrollRef} data-testid="staff-view">
-      <div ref={hostRef} style={{ minHeight: 180 }} />
-    </div>
-  );
-}
-
-/** Relative major for a minor key name (Am → C), for VexFlow key signatures. */
 function relMajor(key: string): string {
   const m = key.replace(/m$/, '');
   const names = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
   const pc: Record<string, number> = { C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3, E: 4, F: 5, 'F#': 6, Gb: 6, G: 7, 'G#': 8, Ab: 8, A: 9, 'A#': 10, Bb: 10, B: 11 };
   return names[((pc[m] ?? 0) + 3) % 12]!;
 }
+const majorKey = (k: string) => (k.endsWith('m') ? relMajor(k) : k);
 
-/** VexFlow Stave text position helper (top). */
-function StaveModifierPositionTop(): number {
-  // Stave.setText(str, position) — position 1 = TOP in VexFlow 4
-  return 1;
+/** Split `gap` 16th ticks starting at `pos` into rest/note values that respect beat boundaries. */
+function splitTicks(pos: number, gap: number): number[] {
+  const out: number[] = [];
+  while (gap > 0) {
+    const toBeat = 4 - (pos % 4);
+    let take = SIZES.find((t) => t <= gap && (t <= toBeat || (pos % 4 === 0 && t % 4 === 0 && pos % Math.min(t, 8) === 0))) ?? 1;
+    if (take === 3 && pos % 2) take = 1;
+    out.push(take); gap -= take; pos += take;
+  }
+  return out;
+}
+
+function buildMeasures(notes: MelodyNote[], bars: number[], sections: Section[], words: StaffWord[], measureText: (s: string) => number): Measure[] {
+  const ms: Measure[] = [];
+  for (let i = 0; i + 1 < bars.length; i++) {
+    const start = bars[i]!, end = bars[i + 1]!, dur = end - start;
+    const toT = (t: number) => Math.max(0, Math.min(16, Math.round(((t - start) / dur) * 16)));
+    let inBar = notes.filter((n) => n.start < end - 1e-3 && n.end > start + 1e-3 && n.start >= start - dur / 32)
+      .map((n) => ({ on: toT(n.start), off: toT(n.end), n }))
+      .sort((a, b) => a.on - b.on);
+    // simplify dense measures: > 8 notes → 8th grid, drop collisions
+    // readability: 8th-note grid (16ths only in sparse bars)
+    const grid = inBar.length > 4 ? 2 : 1;
+    inBar = inBar.map((x) => ({ ...x, on: Math.round(x.on / grid) * grid, off: Math.max(Math.round(x.off / grid) * grid, Math.round(x.on / grid) * grid + grid) }));
+    const dedup: typeof inBar = [];
+    for (const x of inBar) { if (x.on >= 16) continue; const p = dedup[dedup.length - 1]; if (p && p.on === x.on) continue; dedup.push(x); }
+    for (let k = 0; k + 1 < dedup.length; k++) dedup[k]!.off = Math.min(dedup[k]!.off, dedup[k + 1]!.on);
+    const events: Ev[] = [];
+    let pos = 0;
+    const tAt = (p: number) => start + (p / 16) * dur;
+    for (const x of dedup) {
+      if (x.on > pos) for (const r of splitTicks(pos, x.on - pos)) { events.push({ rest: true, ticks: r, t0: tAt(pos), t1: tAt(pos + r) }); pos += r; }
+      const off = Math.min(16, Math.max(x.off, pos + grid));
+      const parts = splitTicks(pos, off - pos);
+      // keep it one symbol: use the first beat-safe value, rest of span becomes rest (cleaner than ties)
+      const take = parts[0]!;
+      events.push({ rest: false, ticks: take, midi: x.n.midi, glideTo: x.n.glideTo, t0: tAt(pos), t1: tAt(pos + take) });
+      pos += take;
+      for (const r of parts.slice(1)) { events.push({ rest: true, ticks: r, t0: tAt(pos), t1: tAt(pos + r) }); pos += r; }
+    }
+    if (pos < 16) for (const r of splitTicks(pos, 16 - pos)) { events.push({ rest: true, ticks: r, t0: tAt(pos), t1: tAt(pos + r) }); pos += r; }
+    // merge consecutive rests within a beat-safe span is handled by splitTicks; collapse an all-rest bar
+    if (events.every((e) => e.rest)) events.splice(0, events.length, { rest: true, ticks: 16, t0: start, t1: end });
+    const sec = sections.find((s) => Math.abs(s.start - start) < dur * 0.5);
+    ms.push({ i, start, end, events, section: sec?.label, minW: 0 });
+  }
+  // lyrics: each word → the single note with nearest onset (≤ 0.4 s); a note keeps all words it receives
+  const allNotes = ms.flatMap((m) => m.events.filter((e) => !e.rest));
+  for (const w of words) {
+    let best: Ev | null = null, bd = 0.4;
+    for (const e of allNotes) { const d = Math.abs(e.t0 - w.start); if (d < bd) { bd = d; best = e; } }
+    if (best) best.lyric = best.lyric ? `${best.lyric} ${w.word}` : w.word;
+  }
+  for (const m of ms) {
+    let w = 24;
+    for (const e of m.events) w += Math.max(MIN_W[e.ticks] ?? 28, e.lyric ? measureText(e.lyric) + 10 : 0);
+    m.minW = Math.max(110, w);
+  }
+  return ms;
+}
+
+export function StaffMelodyView({ notes, bars, keySig, timeSig = '4/4', sections, words = [], time }: StaffMelodyViewProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(900);
+  const layoutRef = useRef<{ measures: { x: number; y: number; w: number; start: number; end: number }[]; noteEls: { el: SVGElement | null; t0: number; t1: number }[]; rects: SVGRectElement[] }>({ measures: [], noteEls: [], rects: [] });
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setWidth(Math.max(320, el.clientWidth - 8)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const measures = useMemo(() => {
+    const c = document.createElement('canvas').getContext('2d')!;
+    c.font = LYRIC_FONT;
+    return buildMeasures(notes, bars, sections, words, (s) => c.measureText(s).width);
+  }, [notes, bars, sections, words]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !measures.length) return;
+    host.innerHTML = '';
+    const key = majorKey(keySig);
+    const ms = notes.map((n) => n.midi).sort((a, b) => a - b);
+    const low = ms.length > 0 && ms[ms.length >> 1]! < 60; // male range → treble 8vb (sounds an octave lower)
+    const shift = low ? 12 : 0;
+    const left = 6, usable = width - left * 2;
+    const maxPerLine = width < 500 ? 2 : width < 900 ? 3 : 4;
+    // probe clef+key+time width
+    const probe = new Stave(0, 0, 400).addClef('treble').addKeySignature(key);
+    const headW = probe.getNoteStartX() + 6;
+    // greedy line packing
+    const lines: Measure[][] = [];
+    let cur: Measure[] = [], curW = headW;
+    for (const m of measures) {
+      if (cur.length && (cur.length >= maxPerLine || curW + m.minW > usable)) { lines.push(cur); cur = []; curW = headW; }
+      cur.push(m); curW += m.minW;
+    }
+    if (cur.length) lines.push(cur);
+    const renderer = new Renderer(host, Renderer.Backends.SVG);
+    renderer.resize(width, lines.length * STAVE_H + 30);
+    const ctx = renderer.getContext();
+    const lay = { measures: [] as { x: number; y: number; w: number; start: number; end: number }[], noteEls: [] as { el: SVGElement | null; t0: number; t1: number }[], rects: [] as SVGRectElement[] };
+    lines.forEach((line, li) => {
+      const y = 22 + li * STAVE_H;
+      const natural = headW + line.reduce((s, m) => s + m.minW, 0);
+      const isLast = li === lines.length - 1;
+      const scale = isLast && natural < usable * 0.7 ? 1 : usable / natural;
+      let x = left;
+      line.forEach((m, k) => {
+        const w = m.minW * scale + (k === 0 ? headW * scale : 0);
+        const stave = new Stave(x, y, w);
+        if (k === 0) { stave.addClef('treble', 'default', low ? '8vb' : undefined).addKeySignature(key); if (li === 0) stave.addTimeSignature(timeSig); }
+        stave.setContext(ctx).draw();
+        if (m.section) {
+          ctx.save(); ctx.setFont('Arial', 13, 'bold'); ctx.setFillStyle('#c2410c');
+          ctx.fillText(m.section, x + 4, y + 24); ctx.restore();
+        }
+        const sns: StaveNote[] = [];
+        const glideFrom: StaveNote[] = [];
+        for (const e of m.events) {
+          const sn = e.rest
+            ? new StaveNote({ keys: ['b/4'], duration: (DUR[e.ticks] ?? 'q') + 'r', clef: 'treble' })
+            : new StaveNote({ keys: [midiToVex(e.midi! + shift, keySig)], duration: DUR[e.ticks] ?? 'q', clef: 'treble', auto_stem: true });
+          if (!e.rest && e.lyric) sn.addModifier(new Annotation(e.lyric).setFont('Arial', 13).setVerticalJustification(Annotation.VerticalJustify.BOTTOM), 0);
+          if (!e.rest && e.glideTo != null && e.glideTo !== e.midi) { sn.addModifier(new Annotation('⌒').setFont('Arial', 12).setVerticalJustification(Annotation.VerticalJustify.TOP), 0); glideFrom.push(sn); }
+          (sn as StaveNote & { _t?: [number, number] })._t = e.rest ? undefined : [e.t0, e.t1];
+          sns.push(sn);
+        }
+        try {
+          const voice = new Voice({ num_beats: 4, beat_value: 4 }).setStrict(false);
+          voice.addTickables(sns);
+          Accidental.applyAccidentals([voice], key);
+          const beams = Beam.generateBeams(sns, { groups: [new Fraction(1, 4)], beam_rests: false, maintain_stem_directions: false });
+          new Formatter().joinVoices([voice]).formatToStave([voice], stave);
+          voice.draw(ctx, stave);
+          beams.forEach((b) => b.setContext(ctx).draw());
+          for (const g of glideFrom) {
+            const idx = sns.indexOf(g), nx = sns.slice(idx + 1).find((n) => !n.isRest());
+            if (nx) new StaveTie({ first_note: g, last_note: nx, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
+          }
+        } catch (err) { console.warn('[staff]', m.i, err); }
+        for (const sn of sns) {
+          const t = (sn as StaveNote & { _t?: [number, number] })._t;
+          if (t) lay.noteEls.push({ el: (sn.getSVGElement?.() ?? null) as SVGElement | null, t0: t[0], t1: t[1] });
+        }
+        lay.measures.push({ x, y, w, start: m.start, end: m.end });
+        x += w;
+      });
+    });
+    const svg = host.querySelector('svg');
+    if (svg) for (const mm of lay.measures) {
+      const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      r.setAttribute('x', String(mm.x)); r.setAttribute('y', String(mm.y + 8));
+      r.setAttribute('width', String(mm.w)); r.setAttribute('height', String(STAVE_H - 18));
+      r.setAttribute('fill', 'rgba(249,115,22,0.13)'); r.setAttribute('visibility', 'hidden');
+      svg.insertBefore(r, svg.firstChild);
+      lay.rects.push(r);
+    }
+    layoutRef.current = lay;
+  }, [measures, keySig, timeSig, width, notes]);
+
+  // playback highlight + vertical auto-scroll
+  const lastLine = useRef(-1);
+  useEffect(() => {
+    const lay = layoutRef.current;
+    const mi = lay.measures.findIndex((m) => time >= m.start && time < m.end);
+    lay.rects.forEach((r, i) => r.setAttribute('visibility', i === mi ? 'visible' : 'hidden'));
+    for (const n of lay.noteEls) n.el?.classList.toggle('sa-staff-cur', time >= n.t0 && time < n.t1);
+    const el = scrollRef.current;
+    if (el && mi >= 0) {
+      const y = lay.measures[mi]!.y;
+      if (y !== lastLine.current) {
+        lastLine.current = y;
+        if (y < el.scrollTop || y + STAVE_H > el.scrollTop + el.clientHeight) el.scrollTo({ top: Math.max(0, y - 20), behavior: 'smooth' });
+      }
+    }
+  }, [time, measures, width]);
+
+  return (
+    <div className="sa-staff" ref={scrollRef} data-testid="staff-view">
+      <div ref={hostRef} />
+    </div>
+  );
 }
